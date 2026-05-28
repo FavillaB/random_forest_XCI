@@ -1,0 +1,56 @@
+cd /home/bfavilla/silico/autosomes_revision/Gm12878
+
+#Creating a bash pipeline for the annotation of different databases
+
+vi GM12878_1kb.sh
+----------
+#!/bin/bash
+
+# Arquivos de entrada
+COORDINATES_BED="/home/bfavilla/silico/autosomes_revision/all.patients.TSS.hg19.bed"
+BIGWIG_FILES=(
+"/home/bfavilla/silico/Gm12878/HDAC2_fold_change_over_control_hg19.bigWig"
+"/home/bfavilla/silico/Gm12878/BMI1_ENCFF956CKZ_fold_change_over_control_hg19.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeSydhTfbsGm12878Znf384hpa004051IggmusSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeSydhTfbsGm12878MafkIggmusSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeSydhTfbsGm12878Sin3anb6001263IggmusSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeSydhTfbsGm12878Chd1a301218aIggmusSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeSydhTfbsGm12878MaxIggmusSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeBroadHistoneGm12878Ezh239875Sig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeHaibTfbsGm12878Tcf3Pcr1xRawRep1.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeHaibTfbsGm12878Tcf3Pcr1xRawRep2.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeSydhTfbsGm12878Mxi1IggmusSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeBroadHistoneGm12878H3k27me3StdSigV2.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeHaibTfbsGm12878Taf1Pcr1xRawRep2.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeOpenChromDnaseGm12878Sig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeOpenChromDnaseGm12878BaseOverlapSignal.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeHaibTfbsGm12878Taf1Pcr1xRawRep1.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeBroadHistoneGm12878H4k20me1StdSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeBroadHistoneGm12878H3k9acStdSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeBroadHistoneGm12878H3k79me2StdSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeBroadHistoneGm12878H3k4me3StdSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeBroadHistoneGm12878H3k4me2StdSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeBroadHistoneGm12878H3k4me1StdSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeBroadHistoneGm12878H3k36me3StdSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeBroadHistoneGm12878H3k27me3StdSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeBroadHistoneGm12878H3k27acStdSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeBroadHistoneGm12878H2azStdSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeBroadHistoneGm12878CtcfStdSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeSydhTfbsGm12878Smc3ab9263IggmusSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeSydhTfbsGm12878TbpIggmusSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeSydhTfbsGm12878Yy1StdSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeSydhTfbsGm12878Rad21IggrabSig.bigWig"
+"/home/bfavilla/silico/Gm12878/wgEncodeSydhTfbsGm12878MaxStdSig.bigWig"
+)
+
+# Arquivo de saída
+
+for BIGWIG in "${BIGWIG_FILES[@]}"; do
+ OUT=$(basename "$BIGWIG" .bigWig).tab
+ echo "Processing: $BIGWIG"
+ /home/bfavilla/silico/bigWigAverageOverBed "$BIGWIG" "$COORDINATES_BED" "$OUT"
+done
+
+echo "Done!"
+
+---------
