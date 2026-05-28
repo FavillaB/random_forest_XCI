@@ -1,0 +1,1954 @@
+################################################################################################
+# GM12878 pipeline - Random Forest model
+
+# Version 2.0 - Genes should be considered "silenced" when ASE defined by phASEr is <0.1 based on ASE, or Log2FC<-1
+
+# Author: Bianca Favilla - Cytogenomic's team - biancafavilla1@gmail.com
+
+################################################################################################
+
+#Libraries
+
+library(randomForest)
+library(caret)
+library(dbplyr)
+library(plyr)
+library(GenomicRanges)
+library("biomaRt")
+library(cluster)
+library(pheatmap)
+library(dplyr)
+library(rtracklayer)
+
+setwd("~/Desktop/UNIFESP/silico_autosomes/gm12878")
+
+################################################################################################
+# Annotation of the table
+################################################################################################
+
+#Step 1: Loading data from RNA-seq
+
+pt1 <- read.table ("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/Data/pt1_up_down_genes_region_fold_change.txt")
+pt2 <- read.table ("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/Data/pt2_up_down_genes_region_fold_change.txt")
+pt3 <- read.table ("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/Data/pt3_up_down_genes_region_fold_change.txt")
+
+degs.table <- rbind(pt1,pt2,pt3)
+
+names(degs.table) <- c("hgnc_symbol","chr_name", "start", "end", "Log2FC")
+
+#Saving table containing all 305 DEGs from all patients
+
+write.table (degs.table, file="degs.table_hg38.txt", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+
+##Creating a table with all analyzed genes in each chromosome 
+
+#All genes analyzed are in the normalized table counts
+
+pt1.all <- read.table ("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/Data/normalized_counts_pt1.txt", header = TRUE)
+pt2.all <- read.table ("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/Data/normalized_counts_pt2.txt", header = TRUE)
+pt3.all <- read.table ("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/Data/normalized_counts_pt3.txt", header = TRUE)
+
+library("biomaRt")
+human <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+##Genes that should be annotated
+
+genes.pt1 <- as.character(pt1.all$gene)
+genes.pt2 <- as.character(pt2.all$gene)
+genes.pt3 <- as.character(pt3.all$gene)
+
+##hg38##
+
+pt1.all.annotated <- getBM(attributes = c("hgnc_symbol","chromosome_name", "start_position", "end_position"),
+                           filters = "hgnc_symbol", values = genes.pt1, mart = human)
+
+pt2.all.annotated <- getBM(attributes = c("hgnc_symbol","chromosome_name", "start_position", "end_position"),
+                           filters = "hgnc_symbol", values = genes.pt2, mart = human)
+
+pt3.all.annotated <- getBM(attributes = c("hgnc_symbol","chromosome_name", "start_position", "end_position"),
+                           filters = "hgnc_symbol", values = genes.pt3, mart = human)
+
+#Filtering for chromosomes involved in the translocation
+
+pt1.chr15.genes <- subset(pt1.all.annotated,pt1.all.annotated$chromosome_name=="15")
+pt2.chr21.genes <- subset(pt2.all.annotated,pt2.all.annotated$chromosome_name=="21")
+pt3.chr13.genes <- subset(pt3.all.annotated,pt3.all.annotated$chromosome_name=="13")
+
+#Joining data of Log2FC to the table with all genes
+
+library("plyr")
+library(dplyr)
+
+pt1.chr15.all <- join(pt1.chr15.genes, degs.table, by = "hgnc_symbol" , type = "left", match = "all")
+pt2.chr21.all <- join(pt2.chr21.genes, degs.table, by = "hgnc_symbol" , type = "left", match = "all")
+pt3.chr13.all <- join(pt3.chr13.genes, degs.table, by = "hgnc_symbol" , type = "left", match = "all")
+
+all.patients <- rbind(pt1.chr15.all,pt2.chr21.all,pt3.chr13.all)
+
+all.patients.final <- subset(all.patients, select= -c(5:7))
+
+dups <- all.patients.final %>%
+  group_by(hgnc_symbol, chromosome_name) %>%
+  filter(n() > 1)
+
+dedup <- all.patients.final %>%
+  distinct(hgnc_symbol, chromosome_name, .keep_all = TRUE)
+
+all.genes_hg38 <- dedup %>%
+  mutate(chromosome_name = paste0("chr", chromosome_name))
+
+names(all.genes_hg38) <- c("hgnc_symbol", "chr", "start_position","end_position","Log2FC")
+
+#Adding ASE information
+
+pt1.ase <- read.table ("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/ASE/AG16566_ASE_genes", header = TRUE)
+pt2.ase <- read.table ("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/ASE/AG17208_ASE_genes", header = TRUE)
+pt3.ase <- read.table ("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/ASE/AG17284_ASE_genes", header = TRUE)
+
+names(pt1.ase) <- c("hgnc_symbol", "Log2FC", "allelic_derivative", "allelic_normal", "haplotype_derivative")
+names(pt2.ase) <- c("hgnc_symbol", "Log2FC", "allelic_derivative", "allelic_normal", "haplotype_derivative")
+names(pt3.ase) <- c("hgnc_symbol", "Log2FC", "allelic_derivative", "allelic_normal", "haplotype_derivative")
+
+ase <- rbind(pt1.ase,pt2.ase,pt3.ase)
+
+all_genes_hg38_ase <- full_join(all.genes_hg38,ase, by=c("hgnc_symbol", "Log2FC"))
+
+
+#Removing NAs
+
+#From column gene
+all_genes_hg38_ase <- all_genes_hg38_ase %>%
+  dplyr::filter(!is.na(hgnc_symbol))
+
+#From all other
+
+all_genes_hg38_ase <- all_genes_hg38_ase %>%
+  dplyr::filter(!dplyr::if_all(-hgnc_symbol, is.na))
+
+write.table (all_genes_hg38_ase, file="genes.table.hg38.txt", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+
+
+#################################################################################
+
+#Step 2: annotation of table
+
+##Annotation with gene start/end
+
+all_genes <- all_genes_hg38_ase$hgnc_symbol #970 genes
+
+human.hg38 <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+human.hg19 <- useEnsembl(biomart="ensembl", dataset="hsapiens_gene_ensembl", GRCh=37)
+
+all_genes_annotated_gene_body <- getBM(attributes = c("hgnc_symbol","chromosome_name", "start_position", "end_position", "strand"),
+                           filters = "hgnc_symbol", values = all_genes, mart = human.hg38)
+all_genes_annotated_gene_body$strand <- ifelse(all_genes_annotated_gene_body$strand == -1, "-", "+")
+
+all_genes_annotated_gene_body_hg19 <- getBM(attributes = c("hgnc_symbol","chromosome_name", "start_position", "end_position"),
+                                       filters = "hgnc_symbol", values = all_genes, mart = human.hg19) 
+
+annotated_genes <- all_genes_annotated_gene_body_hg19$hgnc_symbol
+missing_genes_annotation <- setdiff(all_genes, annotated_genes) #138 genes missing
+
+annotated_genes_hg38 <- all_genes_annotated_gene_body$hgnc_symbol
+missing_genes_annotation_hg38 <- setdiff(all_genes, annotated_genes_hg38) #7 genes missing
+missing_genes_annotation_hg38
+
+# [1] "LOC105370941" "LOC400464"    "LOC105370943" "LOC105370792" "LOC124903490" "LOC105370169" "LOC107984588"
+
+#Adding chr to the data
+
+all_genes_annotated_gene_body$chromosome_name<-paste("chr",all_genes_annotated_gene_body$chromosome_name, sep="")
+
+#Using hg38 and lifting over to hg19
+
+# Chain file
+
+library(rtracklayer)
+chain_file <- "/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/Data/hg38ToHg19.over.chain"
+chain <- import.chain(chain_file)
+
+#GenomicRanges in hg38
+
+table(all_genes_annotated_gene_body$chromosome_name)
+
+all_genes_annotated_gene_body$start_position <- as.numeric(all_genes_annotated_gene_body$start_position)
+all_genes_annotated_gene_body$end_position <- as.numeric(all_genes_annotated_gene_body$end_position)
+
+gr_hg38_genes <- GRanges(
+  seqnames = all_genes_annotated_gene_body$chromosome_name,
+  ranges = IRanges(
+    start = all_genes_annotated_gene_body$start_position,
+    end = all_genes_annotated_gene_body$end_position
+  ),
+  gene = all_genes_annotated_gene_body$hgnc_symbol,
+  strand = all_genes_annotated_gene_body$strand
+)
+
+#Converting to hg19
+gr_hg19_genes_list <- liftOver(gr_hg38_genes, chain)
+
+gr_hg19_genes <- unlist(gr_hg19_genes_list)
+
+if (length(gr_hg19_genes) < length(gr_hg38_genes)) {
+  message("Algumas coordenadas não puderam ser convertidas.")
+} else
+  message("Tudo Certo!")
+
+#Creating hg19 data
+
+hg19_genes <- data.frame(
+  chr = as.character(seqnames(gr_hg19_genes)),
+  start = start(gr_hg19_genes),
+  end = end(gr_hg19_genes),
+  hgnc_symbol = mcols(gr_hg19_genes)$gene, #gene column
+  strand = as.character(strand(gr_hg19_genes)) #strand
+)
+
+table(hg19_genes$chr)
+
+# chr13 chr15 chr21 
+# 308   716   315 
+
+#some duplicated - keep only one 
+
+hg19_genes_unique <- hg19_genes %>%
+  distinct(hgnc_symbol, .keep_all = TRUE) #963 genes
+
+table(hg19_genes_unique$chr)
+
+hg19_genes_unique <- hg19_genes_unique %>%
+  filter(chr %in% c("chr13", "chr21", "chr15")) #963
+
+hg19_genes_unique_bed <- subset(hg19_genes_unique,select=c(1:4))
+
+###################################################################################
+#Summary: hg19_genes_unique_bed contains 963 genes annotated in gene body in bed format
+
+#This is the "gene body" file
+
+write.table (hg19_genes_unique_bed , file="all.patients.gb.hg19_dedup_whole.gene.bed", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+
+###################################################################################
+
+##Annotation with TSS file from SwitchGear Genomics Transcription Start Sites - downloaded using table browser from UCSC
+
+hg19_TSS <- read.delim("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/Data/hg19_TSS")
+View(hg19_genes_unique)
+
+#Filtering for non-pseudo gene is.pseudo = 0
+
+hg19_TSS_filtered <- subset(hg19_TSS,hg19_TSS$isPseudo==0)
+
+# Creating the GRanges for the genes
+gr_genes <- GRanges(
+  seqnames = hg19_genes_unique$chr,                      #chr
+  ranges = IRanges(start = hg19_genes_unique$start, end = hg19_genes_unique$end), #Start and end coordinates
+  strand = hg19_genes_unique$strand,                     #Strand (+ or -)
+  hgnc_symbol = hg19_genes_unique$hgnc_symbol            #Gene name
+)
+
+# Creating the GRanges for the TSS
+gr_TSS <- GRanges(
+  seqnames = hg19_TSS_filtered$chrom,                             # Chromosome names for the TSS
+  ranges = IRanges(start = hg19_TSS_filtered$chromStart, end = hg19_TSS_filtered$chromEnd), # Start and end coordinates
+  strand = hg19_TSS_filtered$strand                               # Strand (+ or -)
+)
+
+# Function to create an annotated dataframe with genes and TSS
+create_annotated_df <- function(gr_genes, gr_TSS) {
+  # Check if the GRanges objects are not empty
+  if (length(gr_genes) == 0 || length(gr_TSS) == 0) {
+    stop("The GRanges objects for genes or TSS are empty!")
+  }
+  
+  # Find the nearest TSS indices based on specific rules
+  nearest_indices <- sapply(seq_along(gr_genes), function(i) {
+    # Check the strand of the current gene
+    gene <- gr_genes[i]
+    
+    # Ensure strand values are valid
+    gene_strand <- as.character(strand(gene)) # Convert to character for comparison
+    if (gene_strand == "+") {
+      # For positive strand, consider the start of the gene
+      nearest_TSS <- which.min(abs(start(gr_TSS) - start(gene)))
+    } else if (gene_strand == "-") {
+      # For negative strand, consider the end of the gene
+      nearest_TSS <- which.min(abs(end(gr_TSS) - end(gene)))
+    } else {
+      # Handle unexpected strand values (e.g., NA or other)
+      nearest_TSS <- NA
+    }
+    return(nearest_TSS)
+  })
+  
+  # Check if the nearest indices are valid (not NA)
+  valid_indices <- !is.na(nearest_indices)
+  
+  # Assign TSS values to genes, handling invalid indices
+  nearest_TSS_start <- ifelse(valid_indices, start(gr_TSS)[nearest_indices], NA)
+  nearest_TSS_end <- ifelse(valid_indices, end(gr_TSS)[nearest_indices], NA)
+
+  # Create the annotated dataframe with all genes, including those without TSS matches
+  annotated_df <- data.frame(
+    chr = as.character(seqnames(gr_genes)),
+    start = start(gr_genes),
+    end = end(gr_genes),
+    gene_name = mcols(gr_genes)$hgnc_symbol,
+    strand = as.character(strand(gr_genes)),
+    nearest_TSS_start = nearest_TSS_start,
+    nearest_TSS_end = nearest_TSS_end
+  )
+  
+  return(annotated_df)
+}
+
+# Filtering genes and TSS by strand
+gr_genes_positive <- gr_genes[strand(gr_genes) == "+"]
+gr_genes_negative <- gr_genes[strand(gr_genes) == "-"]
+
+gr_TSS_positive <- gr_TSS[strand(gr_TSS) == "+"]
+gr_TSS_negative <- gr_TSS[strand(gr_TSS) == "-"]
+
+# Check the number of genes and TSS
+cat("Number of genes on positive strand:", length(gr_genes_positive), "\n")
+cat("Number of TSS on positive strand:", length(gr_TSS_positive), "\n")
+
+# Create the annotated dataframe for the positive strand
+annotated_positive <- create_annotated_df(gr_genes_positive, gr_TSS_positive)
+
+# Create the annotated dataframe for the negative strand
+annotated_negative <- create_annotated_df(gr_genes_negative, gr_TSS_negative)
+
+# Combine the results for both strands
+annotated_genes_hg19_TSS <- rbind(annotated_positive, annotated_negative) #1378
+
+#Creating TSS -/+ 1 kb
+
+#hg19
+
+annotated_genes_hg19_TSS_bed_range <- subset(annotated_genes_hg19_TSS, select= c(1,6,7,4))
+annotated_genes_hg19_TSS_bed_range$nearest_TSS_start <- annotated_genes_hg19_TSS_bed_range$nearest_TSS_start - 1000
+annotated_genes_hg19_TSS_bed_range$nearest_TSS_end <- annotated_genes_hg19_TSS_bed_range$nearest_TSS_end + 1000
+write.table (annotated_genes_hg19_TSS_bed_range , file="all.patients.TSS.hg19.bed ", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+
+###################################################################################
+#Summary: annotated_genes_hg19_TSS_bed_range contains 963 genes annotated according to TSS in bed format
+
+#This is the "TSS" file
+
+###################################################################################
+
+#Step 3: annotation of the table -Adding status info
+
+names(all_genes_hg38_ase)
+names(annotated_genes_hg19_TSS_bed_range)
+genes_Log2FC <- subset(all_genes_hg38_ase, select= c(1,5:8))
+names(genes_Log2FC) <- c("gene_name", "Log2FC", "allelic_derivative","allelic_normal", "haplotype_derivative")
+
+#hg19
+genes_complete.TSS.hg19 <- join(annotated_genes_hg19_TSS_bed_range, genes_Log2FC, by = "gene_name" , type = "left", match = "all")
+View(genes_complete.TSS.hg19) 
+
+#some duplicated - keep only one 
+
+genes_complete.TSS.hg19_status_unique <- genes_complete.TSS.hg19 %>%
+  distinct(gene_name, .keep_all = TRUE) #963
+
+#Checking if all the genes are present
+
+all_genes_in_table <- all(annotated_genes_hg19_TSS_bed_range$gene_name %in% genes_complete.TSS.hg19_status_unique$gene_name) #True
+
+####################################################################################
+
+#Step 5 and 6: Checking distance from XIST and computing it (hg19)
+
+#chr15: XIST - X centromere - chr15 from centromere to telomere
+#chr21: X centromere - XIST - X telomere - chr21 from centromere to telomere
+#chr13: chr13 centromere - chr13 end - chrXp - X centromere - Xist
+
+#1. reorganize table based on chr. and separate each chromosome in different tables
+
+TSS.hg19.FC.chr <- genes_complete.TSS.hg19_status_unique[order(genes_complete.TSS.hg19_status_unique$chr),]
+
+#Subset chromosomes
+
+TSS.hg19.FC.chr15 <- subset(TSS.hg19.FC.chr, TSS.hg19.FC.chr$chr=="chr15")
+TSS.hg19.FC.chr21 <- subset(TSS.hg19.FC.chr, TSS.hg19.FC.chr$chr=="chr21")
+TSS.hg19.FC.chr13 <- subset(TSS.hg19.FC.chr, TSS.hg19.FC.chr$chr=="chr13")
+
+TSS.chr15.up <- as.numeric(TSS.hg19.FC.chr15$nearest_TSS_start)
+TSS.chr21.up <- as.numeric(TSS.hg19.FC.chr21$nearest_TSS_start)
+TSS.chr13.up <- as.numeric(TSS.hg19.FC.chr13$nearest_TSS_start)
+
+#For chromosome 15 (hg19)
+#chr15: XIST - X centromere - chr15 from centromere to telomere
+
+
+#Xist: chrX:73,040,486-73,072,588 -> considering 73040486
+#X centromere: 60,697,629-60,729,731 -> considering 60697629
+
+#X-centromere to Xist
+
+73040486-60697629
+
+distance.XIST.chr15 <- TSS.chr15.up+12342857
+
+TSS.hg19.FC.chr15.distance.XIST <- cbind(TSS.hg19.FC.chr15,distance.XIST.chr15)
+
+names(TSS.hg19.FC.chr15.distance.XIST) <- c("chr", "TSS_start", "TSS_end", "gene", "Log2FC_num", "allelic_derivative", "allelic_normal", "haplotype_derivative", "distance_XIST_linear")
+View(TSS.hg19.FC.chr15.distance.XIST)
+
+#For chromosome 21 (hg19)
+##chr21: X centromere - XIST - X telomere - chr21 from centromere to telomere
+
+
+#Xist: chrX:73,040,486-73,072,588 -> considering 73040486
+#X-breakpoint -> 96096220
+
+#Xist to beggining of chr.21:
+
+96096220-73040486
+
+distance.XIST.chr21 <- TSS.chr21.up+23055734
+
+TSS.hg19.FC.chr21.distance.XIST <- cbind(TSS.hg19.FC.chr21,distance.XIST.chr21)
+names(TSS.hg19.FC.chr21.distance.XIST) <- c("chr", "TSS_start", "TSS_end", "gene", "Log2FC_num", "allelic_derivative", "allelic_normal", "haplotype_derivative", "distance_XIST_linear")
+
+#For chromosome 13 (hg19)
+#chr13: chr13 centromere - chr13 end - chrXp - X centromere - Xist
+
+
+#Xist: chrX:73,040,486-73,072,588 -> considering 73040486
+#chr.Xp, deletion bp -> 21870371
+
+#Xist to chr.Xp () -> 73040486-21870371 -> 51170115
+
+#distance from XIST yo chrXp + whole chromosome 13q (109490236) - TSS
+
+#13q deletion: (115107733-109490236)
+
+distance.XIST.chr13 <- 51170115+109490236-TSS.chr13.up
+
+TSS.hg19.FC.chr13.distance.XIST <- cbind(TSS.hg19.FC.chr13,distance.XIST.chr13)
+
+#Removing deleted region (because it will not make sense)
+
+TSS.hg19.FC.chr13.distance.XIST$nearest_TSS_start <- as.numeric(TSS.hg19.FC.chr13.distance.XIST$nearest_TSS_start)
+
+TSS.hg19.FC.chr13.distance.XIST.no_deletion <- subset(TSS.hg19.FC.chr13.distance.XIST, TSS.hg19.FC.chr13.distance.XIST$nearest_TSS_start< 109490236)
+
+names(TSS.hg19.FC.chr13.distance.XIST.no_deletion) <- c("chr", "TSS_start", "TSS_end", "gene", "Log2FC_num", "allelic_derivative", "allelic_normal", "haplotype_derivative", "distance_XIST_linear")
+
+################################################################################
+
+#Step 7: Joining tables
+
+distance.XIST.all <- rbind(TSS.hg19.FC.chr15.distance.XIST,TSS.hg19.FC.chr21.distance.XIST,TSS.hg19.FC.chr13.distance.XIST.no_deletion)
+
+write.table (distance.XIST.all , file="distance.XIST.all.txt", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+
+###################################################################################
+#Summary: distance.XIST.all has all the genes that should be annotated in hg19
+#it excludes genes on the deleted region. Beware of joining it with the previous annotations
+#Latest table should have 934 genes
+###################################################################################
+
+#Step 8: Adding extra features
+
+View(distance.XIST.all) 
+
+#Annotation of ALU, LINE and etc
+
+#Genes in region
+
+genes <- getBM(attributes = c('ensembl_gene_id', 'external_gene_name', 'chromosome_name',
+                              'start_position', 'end_position', 'strand', 'gene_biotype'),
+               mart = human.hg19)
+
+#Lines/Alu
+
+line_elements <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/Data/all_LINE_elements", header = TRUE)
+alu_elements <- read.table ("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/Data/all_Alu_elements", header=TRUE)
+
+line_elements <- subset(line_elements, repFamily %in% c("L1", "L2"))
+
+#Adding chromosome
+genes$chromosome_name <- paste("chr", genes$chromosome_name, sep="")
+
+#Genomic segments
+
+intervals_data <- distance.XIST.all
+
+#700 kb around the TSS (annotate -349.000 for TSS_start and +349.000 bp) for repeats and 1 MB around the TSS for genes (-499000/+499000) 
+#Trying 1 Mb
+
+names(intervals_data)
+
+intervals_data$TSS_start <- as.numeric(intervals_data$TSS_start)
+intervals_data$TSS_end <- as.numeric(intervals_data$TSS_end)
+
+intervals_data <- intervals_data %>%
+  mutate(TSS_repeats_start = TSS_start - 349000,
+         TSS_repeats_end = TSS_end + 349000,
+         TSS_genes_start = TSS_start - 499000,
+         TSS_genes_end = TSS_end + 499000)
+
+#GRanges for intervals
+intervals_granges.genes <- GRanges(seqnames = intervals_data$chr,
+                                   ranges = IRanges(start = intervals_data$TSS_genes_start,
+                                                    end = intervals_data$TSS_genes_end))
+
+intervals_granges.repeats <- GRanges(seqnames = intervals_data$chr,
+                                     ranges = IRanges(start = intervals_data$TSS_repeats_start,
+                                                      end = intervals_data$TSS_repeats_end))
+
+#GRanges for genes position
+gene_granges <- GRanges(seqnames = genes$chromosome_name,
+                        ranges = IRanges(start = genes$start_position,
+                                         end = genes$end_position))
+
+#GRanges for Lines position
+gene_granges.line <- GRanges(seqnames = line_elements$genoName,
+                             ranges = IRanges(start = line_elements$genoStart,
+                                              end = line_elements$genoEnd))
+
+gene_granges.alu <- GRanges(seqnames = alu_elements$genoName,
+                            ranges = IRanges(start = alu_elements$genoStart,
+                                             end = alu_elements$genoEnd))
+
+#Counting overlaps
+
+overlap_counts.gene <- countOverlaps(intervals_granges.genes, gene_granges)
+overlap_counts.line <- countOverlaps(intervals_granges.repeats, gene_granges.line)
+overlap_counts.alu <- countOverlaps(intervals_granges.repeats, gene_granges.alu)
+
+intervals_data <- intervals_data %>%
+  mutate(number_of_genes_in_interval = overlap_counts.gene,
+         gene_interval_length = TSS_genes_end - TSS_genes_start,
+         gene_density = number_of_genes_in_interval/gene_interval_length,
+         number_of_LINES_in_interval = overlap_counts.line,
+         repeats_interval_length = TSS_repeats_end - TSS_repeats_start,
+         LINE_density = number_of_LINES_in_interval/repeats_interval_length,
+         number_of_Alu_in_interval = overlap_counts.alu,
+         ALU_density = number_of_Alu_in_interval/repeats_interval_length)
+
+write.table (intervals_data, file="all_genes_LINE_genes_Alu_annotation.txt", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+names(intervals_data)
+
+##Adding extra features
+enhancers <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/Data/enhancer_data_hg19_enhancers_track", header = TRUE) #for number of enhancers - 1kb
+cpg <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/Data/CpG_islands_hg19_UCSC_track") #for overlap with CpG island - 1 kb
+
+names(cpg) <- c("bin", "chrom", "chromStart", "chromEnd", "Cpg", "Cpg_name", "length", "cpgNum", "gcNum", "perCpg", "perGc", "obsExp")
+
+methylation <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/Data/GM12878_methylation_hg19_HAUB_Methyl450_UCSC_track", header = FALSE) #for number of methylated/unmethylated/partially methylated Cs - 1 kb
+
+names(methylation) <- c("bin", "chrom", "chromStart", "chromEnd", "name", "score", "strand", "thickStart", "thickEnd", "itemRgb")
+
+
+# 255,127,0 = orange (methylated)
+# 128,0,128 = purple (partially methylated)
+# 0,0,205 = blue (unmethylated)
+
+methylation.methylated <- subset(methylation, methylation$itemRgb == "255,127,0")
+methylation.partial.methylated <- subset(methylation, methylation$itemRgb == "128,0,128")
+methylation.unmethylated <- subset(methylation, methylation$itemRgb == "0,0,205")
+
+tad <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/Data/TADs_akdemir_hg19.txt", header=TRUE) #Overlap with each TAD
+unique(tad$Type) #five levels: "Low", "Repressed", "Heterochromatin", "Low-active", and "Active" 
+
+# GRanges for TSS position
+gene_granges <- GRanges(seqnames = intervals_data$chr,
+                        ranges = IRanges(start = intervals_data$TSS_start,
+                                         end = intervals_data$TSS_end)) #+/- 1Kb
+
+# GRanges for the rest
+granges.enhancers <- GRanges(seqnames = enhancers$chrom,
+                             ranges = IRanges(start = enhancers$chromStart,
+                                              end = enhancers$chromEnd))
+
+granges.cpg <- GRanges(seqnames = cpg$chrom,
+                       ranges = IRanges(start = cpg$chromStart,
+                                        end = cpg$chromEnd))
+
+granges.methylated <- GRanges(seqnames = methylation.methylated$chrom,
+                              ranges = IRanges(start = methylation.methylated$chromStart,
+                                               end = methylation.methylated$chromEnd))
+
+granges.partially.methylated <- GRanges(seqnames = methylation.partial.methylated$chrom,
+                                        ranges = IRanges(start = methylation.partial.methylated$chromStart,
+                                                         end = methylation.partial.methylated$chromEnd))
+
+granges.unmethylated <- GRanges(seqnames = methylation.unmethylated$chrom,
+                                ranges = IRanges(start = methylation.unmethylated$chromStart,
+                                                 end = methylation.unmethylated$chromEnd))
+
+granges.tad <- GRanges(seqnames = tad$chromosome,
+                       ranges = IRanges(start = tad$start,
+                                        end = tad$end),
+                       Type=tad$Type)
+
+# Counting overlaps
+overlap_counts.enhancers <- countOverlaps(gene_granges, granges.enhancers)
+overlap_counts.cpg <- countOverlaps(gene_granges, granges.cpg)
+overlap_counts.methylated <- countOverlaps(gene_granges, granges.methylated)
+overlap_counts.partially.methylated <- countOverlaps(gene_granges, granges.partially.methylated)
+overlap_counts.unmethylated <- countOverlaps(gene_granges, granges.unmethylated)
+overlap_tads <- findOverlaps(gene_granges,granges.tad)
+
+#Adding TAD data to original table
+
+gm12878.table <- intervals_data
+
+gm12878.table$TAD_Type <- rep("none", nrow(gm12878.table)) # Criar coluna TAD_Type com valores NA por padrão
+gm12878.table$TAD_Type[queryHits(overlap_tads)] <- mcols(granges.tad)$Type[subjectHits(overlap_tads)]
+
+gm12878.table <- gm12878.table %>%
+  mutate(interval_length = TSS_end - TSS_start,
+         number_of_enhancers_in_interval = overlap_counts.enhancers,
+         number_of_cpg_islands_in_interval = overlap_counts.cpg,
+         number_of_methylated = overlap_counts.methylated,
+         number_of_partially_methylated = overlap_counts.partially.methylated,
+         number_of_unmethylated = overlap_counts.unmethylated)
+
+write.table (gm12878.table, file="all_genes_LINE_genes_Alu_annotation_with_extra_hg19.txt", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+names(gm12878.table)
+
+################################################################################
+#Summary
+
+#gm12878.table: table with 934 genes that were annotated using bigWigOverBed - file all.patients.TSS.hg19.bed, all.patients.TSS.hg38.bed
+
+################################################################################
+
+#Step 9: Adding annotated features to the table
+
+View(gm12878.table) #table with 934 genes that were annotated using bigWigOverBed - file all.patients.TSS.hg19.bed, all.patients.TSS.hg38.bed
+
+#Reading annotated tables
+
+path <- "/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878"
+files <- list.files(path, pattern = "\\.tab$", full.names = TRUE)
+
+BMI1.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/BMI1.tab")
+HDAC2.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/HDAC2.tab")
+CTCF.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeBroadHistonegm12878CtcfStdSig.tab")
+EZH2.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeBroadHistonegm12878Ezh239875Sig.tab")
+H2AZ.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeBroadHistonegm12878H2azStdSig.tab")
+H3K27AC.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeBroadHistonegm12878H3k27acStdSig.tab")
+H3K27ME3.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeBroadHistonegm12878H3k27me3StdSig.tab")
+H3K36ME3.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeBroadHistonegm12878H3k36me3StdSig.tab")
+H3K4ME1.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeBroadHistonegm12878H3k4me1StdSig.tab")
+H3K4ME2.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeBroadHistonegm12878H3k4me2StdSig.tab")
+H3K4ME3.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeBroadHistonegm12878H3k4me3StdSig.tab")
+H3K79ME2.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeBroadHistonegm12878H3k79me2StdSig.tab")
+H3K9AC.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeBroadHistonegm12878H3k9acStdSig.tab")
+H4K20ME1.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeBroadHistonegm12878H4k20me1StdSig.tab")
+
+TAF1.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeHaibTfbsgm12878Taf1Pcr1xRawRep1.tab")
+
+DNASE.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeOpenChromDnasegm12878Sig.tab")
+
+CHD1A.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeSydhTfbsgm12878CHD1A301218aIggmusSig.tab")
+MAFK.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeSydhTfbsgm12878MafkIggmusSig.tab")
+MAX.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeSydhTfbsgm12878MaxStdSig.tab")
+MXI1.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeSydhTfbsgm12878Mxi1IggmusSig.tab")
+RAD21.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeSydhTfbsgm12878Rad21IggrabSig.tab")
+SIN3A.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeSydhTfbsgm12878Sin3anb6001263IggmusSig.tab")
+SMC3.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeSydhTfbsgm12878Smc3ab9263IggmusSig.tab")
+YY1.gm12878 <- read.table("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/annotated_1kb_gm12878/wgEncodeSydhTfbsgm12878Yy1StdSig.tab")
+
+names(BMI1.gm12878) <- c("gene","size","covered","sum","mean0_BMI1.gm12878","mean_BMI1.gm12878")
+names(HDAC2.gm12878) <- c("gene","size","covered","sum","mean0_HDAC2.gm12878","mean_HDAC2.gm12878")
+names(CTCF.gm12878) <- c("gene","size","covered","sum","mean0_CTCF.gm12878","mean_CTCF.gm12878")
+names(EZH2.gm12878) <- c("gene","size","covered","sum","mean0_EZH2.gm12878","mean_EZH2.gm12878")
+names(H2AZ.gm12878) <- c("gene","size","covered","sum","mean0_H2AZ.gm12878","mean_H2AZ.gm12878")
+names(H3K27AC.gm12878) <- c("gene","size","covered","sum","mean0_H3K27AC.gm12878","mean_H3K27AC.gm12878")
+names(H3K27ME3.gm12878) <- c("gene","size","covered","sum","mean0_H3K27ME3.gm12878","mean_H3K27ME3.gm12878")
+names(H3K36ME3.gm12878) <- c("gene","size","covered","sum","mean0_H3K36ME3.gm12878","mean_H3K36ME3.gm12878")
+names(H3K4ME1.gm12878) <- c("gene","size","covered","sum","mean0_H3K4ME1.gm12878","mean_H3K4ME1.gm12878")
+names(H3K4ME2.gm12878) <- c("gene","size","covered","sum","mean0_H3K4ME2.gm12878","mean_H3K4ME2.gm12878")
+names(H3K4ME3.gm12878) <- c("gene","size","covered","sum","mean0_H3K4ME3.gm12878","mean_H3K4ME3.gm12878")
+names(H3K79ME2.gm12878) <- c("gene","size","covered","sum","mean0_H3K79ME2.gm12878","mean_H3K79ME2.gm12878")
+names(H3K9AC.gm12878) <- c("gene","size","covered","sum","mean0_H3K9AC.gm12878","mean_H3K9AC.gm12878")
+names(H4K20ME1.gm12878) <- c("gene","size","covered","sum","mean0_H4K20ME1.gm12878","mean_H4K20ME1.gm12878")
+names(TAF1.gm12878) <- c("gene","size","covered","sum","mean0_TAF1.gm12878","mean_TAF1.gm12878")
+names(DNASE.gm12878) <- c("gene","size","covered","sum","mean0_DNASE.gm12878","mean_DNASE.gm12878")
+names(CHD1A.gm12878) <- c("gene","size","covered","sum","mean0_CHD1A.gm12878","mean_CHD1A.gm12878")
+names(MAFK.gm12878) <- c("gene","size","covered","sum","mean0_MAFK.gm12878","mean_MAFK.gm12878")
+names(MAX.gm12878) <- c("gene","size","covered","sum","mean0_MAX.gm12878","mean_MAX.gm12878")
+names(MXI1.gm12878) <- c("gene","size","covered","sum","mean0_MXI1.gm12878","mean_MXI1.gm12878")
+names(RAD21.gm12878) <- c("gene","size","covered","sum","mean0_RAD21.gm12878","mean_RAD21.gm12878")
+names(SIN3A.gm12878) <- c("gene","size","covered","sum","mean0_SIN3A.gm12878","mean_SIN3A.gm12878")
+names(SMC3.gm12878) <- c("gene","size","covered","sum","mean0_SMC3.gm12878","mean_SMC3.gm12878")
+names(YY1.gm12878) <- c("gene","size","covered","sum","mean0_YY1.gm12878","mean_YY1.gm12878")
+
+
+
+df.1 <- list(
+  gm12878.table,
+  BMI1.gm12878,
+  HDAC2.gm12878,
+  CTCF.gm12878,
+  EZH2.gm12878,
+  H2AZ.gm12878,
+  H3K27AC.gm12878,
+  H3K27ME3.gm12878,
+  H3K36ME3.gm12878,
+  H3K4ME1.gm12878,
+  H3K4ME2.gm12878,
+  H3K4ME3.gm12878,
+  H3K79ME2.gm12878,
+  H3K9AC.gm12878,
+  H4K20ME1.gm12878,
+  TAF1.gm12878,
+  DNASE.gm12878,
+  CHD1A.gm12878,
+  MAFK.gm12878,
+  MAX.gm12878,
+  MXI1.gm12878,
+  RAD21.gm12878,
+  SIN3A.gm12878,
+  SMC3.gm12878,
+  YY1.gm12878
+)
+
+# Adjust the name of the list to indicate it contains data frames
+df.1_sorted_named <- lapply(df.1, function(df) {
+  if (!"gene" %in% colnames(df)) stop("The 'gene' column is missing in one or more tables")
+  df[order(df$gene), ] # Sort each table by the 'gene' column
+})
+
+# Perform a progressive join of the tables
+gm12878.table_joint <- Reduce(function(x, y) {
+  full_join(x, y, by = "gene") # Merge tables by the 'gene' column
+}, df.1_sorted_named)
+
+
+
+# Remove rows with NAs in any column
+gm12878.table_joint_cleaned <- subset(gm12878.table_joint, !is.na(gm12878.table_joint$distance_XIST_linear))
+
+
+all(gm12878.table$gene %in% gm12878.table_joint_cleaned$gene)
+#[1] TRUE
+
+#Saving
+
+write.table (gm12878.table_joint_cleaned, file="gm12878_validation_LRS_table.txt", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+
+################################################################################
+#Summary: gm12878.table_joint_cleaned is the table with all the data we need
+################################################################################
+#Step 11: Organizing the table 
+
+gm12878.rf.right <- gm12878.table_joint_cleaned
+
+names(gm12878.rf.right)
+gm12878.rf.right_relevel <- gm12878.rf.right %>%
+  mutate(Log2FC.2cat_relevel = Log2FC_num)
+
+write.table (gm12878.rf.right_relevel , file="gm12878_right_LRS_table_dirty_strict", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+
+
+##################################################################################
+
+#Relevel:
+
+gm12878.rf.right_relevel <- gm12878.rf.right_relevel %>%
+  dplyr::mutate(
+    Log2FC.2cat_relevel = case_when(
+      Log2FC_num <= -1 |
+        allelic_derivative <= 0.10 ~ "Subject",
+      TRUE ~ "Escapee"
+    ),
+    Log2FC.2cat_relevel = factor(Log2FC.2cat_relevel,
+                                 levels = c("Escapee", "Subject"))
+  )
+
+table(gm12878.rf.right_relevel$Log2FC.2cat_relevel)
+
+# Escapee Subject 
+# 815     119
+
+write.table (gm12878.rf.right_relevel , file="gm12878_right_LRS_table_dirty_for_LR_Log2FC<-1", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+#######################################################################################
+#Step 12: preparing it for RF - Using mean0
+
+names(gm12878.rf.right_relevel) <- make.names(names(gm12878.rf.right_relevel), unique = TRUE)
+
+gm12878.rf.right_relevel <- gm12878.rf.right_relevel %>%
+  dplyr::select(-matches("group|TSS|chr|mean_|Log2FC.categorical|rep2|H9.gm12878|size|sum|covered|H3K36me3_gb.gm12878|interval_length"))
+
+names(gm12878.rf.right_relevel)
+
+gm12878.rf.final <- gm12878.rf.right_relevel %>%
+  dplyr::select(-c(2:5,7,9,11)) #Removing Log2FC_num, allelic_normal, allelic_derivative, 
+#                               haplotype derivative and number_of columns
+
+names(gm12878.rf.final) #934
+
+##################################################################################
+# Checking status of genes
+##################################################################################
+
+table(genes$gene_biotype)
+
+genes_info <- genes %>% dplyr::select (external_gene_name,gene_biotype)
+names(genes_info) <- c("gene","gene_biotype")
+genes_info_unique <- genes_info %>%
+  distinct(gene, .keep_all = TRUE)
+
+
+gm12878.rf.final_info <- left_join(gm12878.rf.final,genes_info_unique, by="gene")
+
+table(gm12878.rf.final_info$gene_biotype,gm12878.rf.final_info$Log2FC.2cat_relevel)
+
+# Escapee Subject
+# antisense                 18       3
+# lincRNA                   19       3
+# miRNA                      5       0
+# processed_transcript       8       0
+# protein_coding           607      96
+# pseudogene                34       4
+# sense_intronic             1       0
+# sense_overlapping          0       1
+# snoRNA                     5       0
+
+
+tannan_table_full <- read.delim("/Users/bfavilla/Desktop/UNIFESP/silico_autosomes/gm12878/tannan_gm12878_validation_LRS_table.txt")
+tannan_table_full_info <- left_join(tannan_table_full,genes_info_unique, by="gene")
+
+
+categories <- names(gm12878.rf.final_info)
+tannan_table_categories <- tannan_table_full_info %>%
+  dplyr::select(any_of(categories))
+
+tannan_table_categories <- tannan_table_categories %>%
+  mutate(Log2FC.2cat_relevel = recode(Log2FC.2cat_relevel,
+                                      "Inactive" = "Subject",
+                                      "Active" = "Escapee"))
+
+names(tannan_table_categories)
+
+table(tannan_table_categories$gene_biotype,tannan_table_categories$Log2FC.2cat_relevel)
+
+
+#                         Escapee Subject
+# antisense                  5       6
+# lincRNA                    7       0
+# miRNA                     54       3
+# processed_transcript       3       2
+# protein_coding           444     334
+# pseudogene                 6       1
+# snoRNA                    37       2
+
+categories <- setdiff(names(gm12878.rf.final), c("Log2FC_num", "gene_biotype", "allelic_normal", "allelic_derivative", "haplotype_derivative"))
+
+##################################################################################
+#Preparation of tables - prediction
+##################################################################################
+
+rf_data <- gm12878.rf.final %>%
+  dplyr::select(any_of(categories))
+
+table(rf_data$Log2FC.2cat_relevel) 
+
+# Escapee Subject 
+# 815     119 
+
+rf_tannan_data <- tannan_table_categories %>%
+  dplyr::select(any_of(categories))
+
+names(rf_data)
+names(rf_tannan_data)
+
+##################################################################################
+# Data together
+##################################################################################
+
+identical(names(rf_data), names(rf_tannan_data)) #True
+
+data_join <- rbind(rf_data,rf_tannan_data)
+
+table(data_join$Log2FC.2cat_relevel)
+
+# Escapee Subject 
+# 1371     467 
+
+#Defining predictors
+
+predictors <- setdiff(names(data_join), c("Log2FC.2cat_relevel","gene"))
+
+set.seed(123)
+
+################################################################################
+# Repeating analysis with the same subset of genes from the hESC model
+################################################################################
+
+hESC_all_train.downsampled <- read.delim("~/Desktop/UNIFESP/silico_autosomes/hESC_training_downsampled_set.txt")
+
+hESC_all_test <- read.delim("~/Desktop/UNIFESP/silico_autosomes/hESC_test_set.txt")
+
+hESC_train_genes <- hESC_all_train.downsampled$gene
+hESC_test_genes <- hESC_all_test$gene
+
+
+hESC.train <- data_join %>% filter (gene %in% hESC_train_genes)
+hESC.test <- data_join %>% filter (gene %in% hESC_test_genes)
+
+set.seed(123)
+hESC_all_rf_model_significant <- randomForest(
+  x = hESC.train[, predictors],
+  y = hESC.train$Log2FC.2cat_relevel,
+  ntree = 500,
+  importance = TRUE,
+  proximity = TRUE
+)
+
+print(hESC_all_rf_model_significant)
+
+# Call:
+#   randomForest(x = hESC.train[, predictors], y = hESC.train$Log2FC.2cat_relevel,      ntree = 500, importance = TRUE, proximity = TRUE) 
+# Type of random forest: classification
+# Number of trees: 500
+# No. of variables tried at each split: 5
+# 
+# OOB estimate of  error rate: 21.41%
+# Confusion matrix:
+#   Escapee Subject class.error
+# Escapee     268      59   0.1804281
+# Subject      81     246   0.2477064
+
+hESC.test$Log2FC.2cat_relevel <- as.factor(hESC.test$Log2FC.2cat_relevel)
+hESC_prediction_data_all <- predict(hESC_all_rf_model_significant, hESC.test[, predictors])
+confusionMatrix(hESC_prediction_data_all, hESC.test$Log2FC.2cat_relevel)
+
+# Confusion Matrix and Statistics
+# 
+# Reference
+# Prediction Escapee Subject
+# Escapee     332      37
+# Subject      79     103
+# 
+# Accuracy : 0.7895         
+# 95% CI : (0.753, 0.8228)
+# No Information Rate : 0.7459         
+# P-Value [Acc > NIR] : 0.0097024      
+# 
+# Kappa : 0.4946         
+# 
+# Mcnemar's Test P-Value : 0.0001408      
+#                                          
+#             Sensitivity : 0.8078         
+#             Specificity : 0.7357         
+#          Pos Pred Value : 0.8997         
+#          Neg Pred Value : 0.5659         
+#              Prevalence : 0.7459         
+#          Detection Rate : 0.6025         
+#    Detection Prevalence : 0.6697         
+#       Balanced Accuracy : 0.7718         
+#                                          
+#        'Positive' Class : Escapeee              
+
+accuracy <- mean(hESC_prediction_data_all == hESC.test$Log2FC.2cat_relevel)*100
+cat('Accuracy on testing data: ', round(accuracy, 2), '%',  sep='')
+
+# Accuracy on testing data: 80.36%
+
+
+hESC.test$prediction <- hESC_prediction_data_all
+
+#Predicted vs real
+hESC_misclassified <- hESC.test %>%
+  dplyr::filter(prediction != Log2FC.2cat_relevel)
+
+head(hESC_misclassified)
+hESC_misclassified_genes <- hESC_misclassified$gene
+
+
+#Counting where it came from
+hESC_n_rf_data <- sum(hESC_misclassified_genes %in% rf_data$gene)
+hESC_n_rf_tannan <- sum(hESC_misclassified_genes %in% rf_tannan_data$gene)
+
+# Resultado em data.frame
+hESC_source_counts <- data.frame(
+  Source = c("rf_data", "rf_tannan_data"),
+  Misclassified_Count = c(hESC_n_rf_data, hESC_n_rf_tannan)
+)
+
+print(hESC_source_counts)
+
+# Source Misclassified_Count
+# 1        rf_data                  51
+# 2 rf_tannan_data                  65
+
+
+hESC_misclassified_counts <- hESC_misclassified %>%
+  dplyr::mutate(Source = case_when(
+    gene %in% rf_data$gene ~ "rf_data",
+    gene %in% rf_tannan_data$gene ~ "rf_tannan_data",
+    TRUE ~ "Other"
+  )) %>%
+  dplyr::count(Source, Log2FC.2cat_relevel)
+
+print(hESC_misclassified_counts)
+
+# Source Log2FC.2cat_relevel  n
+# 1        rf_data             Escapee 26
+# 2        rf_data             Subject 25
+# 3 rf_tannan_data             Escapee 53
+# 4 rf_tannan_data             Subject 12
+
+#Correctly classified
+
+hESC_classified <- hESC.test %>%
+  dplyr::filter(prediction == Log2FC.2cat_relevel)
+
+hESC_classified_genes <- hESC_classified$gene
+
+#Counting where it came from
+hESC_n_rf_data_correct <- sum(hESC_classified_genes %in% rf_data$gene)
+hESC_n_rf_tannan_correct <- sum(hESC_classified_genes %in% rf_tannan_data$gene)
+
+# Resultado em data.frame
+hESC_source_counts_correct <- data.frame(
+  Source = c("rf_data", "rf_tannan_data"),
+  classified_Count = c(hESC_n_rf_data_correct, hESC_n_rf_tannan_correct)
+)
+
+print(hESC_source_counts_correct)
+
+# Source classified_Count
+# 1        rf_data              230
+# 2 rf_tannan_data              205
+
+
+hESC_classified_counts <- hESC_classified %>%
+  dplyr::mutate(Source = case_when(
+    gene %in% rf_data$gene ~ "rf_data",
+    gene %in% rf_tannan_data$gene ~ "rf_tannan_data",
+    TRUE ~ "Other"
+  )) %>%
+  dplyr::count(Source, Log2FC.2cat_relevel)
+
+print(hESC_classified_counts)
+
+# Source Log2FC.2cat_relevel   n
+# 1        rf_data             Escapee 217
+# 2        rf_data             Subject  13
+# 3 rf_tannan_data             Escapee 115
+# 4 rf_tannan_data             Subject  90
+
+
+hESC_genes_rf_data <- sum(hESC.test$gene %in% rf_data$gene) #281 genes
+hESC_genes_rf_tannan <- sum(hESC.test$gene %in% rf_tannan_data$gene) #270 genes
+
+
+#Amount of genes 
+
+#rf_data = 281 genes in total, 230 correctly classified -> 81,8% correctly classified
+#rf_tannan = 270 genes in total, 205 correctly classified -> 75,9% correctly classified
+
+#Variable importance
+
+varImpPlot(hESC_all_rf_model_significant,
+           sort = T,
+           type = 1,
+           main = "Variable Importance")
+
+
+hESC_imp_df <- importance(hESC_all_rf_model_significant, type = 1) %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Variable") 
+hESC_imp_df <- hESC_imp_df %>%
+  arrange(desc(MeanDecreaseAccuracy))
+
+hESC_imp_df$Variable
+
+hESC_imp_df <- hESC_imp_df %>%
+  mutate(Variable = recode(Variable, !!!nice_names_EN))
+
+hESC_imp_df <- hESC_imp_df %>%
+  arrange(MeanDecreaseAccuracy) %>%
+  mutate(Variable = factor(Variable, levels = Variable))
+
+
+
+# Plot
+
+p <- ggplot2::ggplot(hESC_imp_df, ggplot2::aes(x = Variable, y = MeanDecreaseAccuracy, fill = MeanDecreaseAccuracy)) +
+  ggplot2::geom_col(show.legend = FALSE, width = 0.7) +
+  ggplot2::coord_flip() +
+  ggplot2::scale_fill_gradient(low = "skyblue3", high = "deeppink4") +
+  ggplot2::labs(
+    title = "Variable Importance (Mean Decrease Accuracy)",
+    x = NULL,
+    y = "Mean Decrease Accuracy"
+  ) +
+  ggplot2::theme_minimal(base_size = 14) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(hjust = 0.5, face = "bold"),
+    axis.text.y = ggplot2::element_text(size = 12, margin = ggplot2::margin(r = 10)),
+    panel.grid.major.y = ggplot2::element_blank()
+  )
+
+ggsave(filename = "hESC_data_variable_importance_all_model.png",  
+       plot = p,                              
+       width = 10, height = 8,                 
+       dpi = 300)                             
+
+
+####################################################
+#RFE with hESC data
+####################################################
+
+table(hESC.train$Log2FC.2cat_relevel) #327 each
+
+hESC_predictors_data_all <- hESC.train[,predictors]
+hESC_response_data_all <- hESC.train$Log2FC.2cat_relevel
+
+hESC_results.rfe <- rfe(
+  hESC_predictors_data_all, 
+  hESC_response_data_all,
+  sizes = c(1:34),
+  rfeControl = control,
+  metric = "Accuracy",
+  method = "rf",
+  ntree = 1000)
+
+print(hESC_results.rfe)
+hESC_results.rfe$results
+
+# 6   0.8079 0.6157    0.04876 0.09755        *
+
+print(predictors(hESC_results.rfe))
+
+# [1] "mean0_DNASE.gm12878"    "number_of_unmethylated" "distance_XIST_linear"   "gene_density"          
+# [5] "ALU_density"            "LINE_density" 
+
+hESC_importancias_all <- varImp(hESC_results.rfe$fit)
+
+print(hESC_importancias_all) #by subject/escapee
+
+# Escapee  Subject
+# mean0_DNASE.gm12878    48.97799 48.97799
+# number_of_unmethylated 21.36340 21.36340
+# distance_XIST_linear   41.79813 41.79813
+# gene_density           45.55694 45.55694
+# ALU_density            37.68286 37.68286
+# LINE_density           38.51266 38.51266
+
+hESC.train$Log2FC.2cat_relevel <- as.factor(hESC.train$Log2FC.2cat_relevel)
+
+hESC_predictors_rfe_all <- rownames(hESC_importancias_all)
+
+#Verifying stability
+
+set.seed(123)
+hESC_rfe_runs <- replicate(20, {
+  res <- rfe(
+    hESC_predictors_data_all,
+    hESC_response_data_all,
+    sizes = c(1:41),
+    rfeControl = control,
+    method = "rf",
+    ntree = 1000
+  )
+  predictors(res)
+}, simplify = FALSE)
+
+table(unlist(rfe_runs))
+
+hESC_predictors_rfe_all <- c("mean0_DNASE.gm12878", "number_of_unmethylated", "distance_XIST_linear",
+                             "gene_density", "ALU_density", "LINE_density", "mean0_EZH2.gm12878")
+
+
+set.seed(123)
+
+hESC_formula_rfe_all <- as.formula(
+  paste("Log2FC.2cat_relevel ~", paste(hESC_predictors_rfe_all, collapse = " + "))
+)
+
+tuneRF(
+  x = hESC.train[, hESC_predictors_rfe_all], 
+  y = hESC.train$Log2FC.2cat_relevel,
+  stepFactor = 1.5,
+  ntreeTry = 1000,
+  improve = 0.01,
+  trace = TRUE)
+
+# mtry = 2  OOB error = 17.89% 
+# Searching left ...
+# Searching right ...
+# mtry = 3 	OOB error = 18.35% 
+# -0.02564103 0.01 
+# mtry  OOBError
+# 2.OOB    2 0.1788991
+# 3.OOB    3 0.1834862
+
+set.seed(123)
+
+hESC_rfe_model.all <- randomForest(hESC_formula_rfe_all, data = hESC.train, ntree=1000, mtry=2, importance = TRUE)
+
+print(hESC_rfe_model.all)
+
+# Call:
+#   randomForest(formula = hESC_formula_rfe_all, data = hESC.train,      ntree = 1000, mtry = 2, importance = TRUE) 
+# Type of random forest: classification
+# Number of trees: 1000
+# No. of variables tried at each split: 2
+# 
+# OOB estimate of  error rate: 18.2%
+# Confusion matrix:
+#   Escapee Subject class.error
+# Escapee     271      56   0.1712538
+# Subject      63     264   0.1926606
+
+hESC.test$hESC_prediction_rfe_all <- predict(hESC_rfe_model.all, hESC.test[, hESC_predictors_rfe_all])
+confusionMatrix(hESC.test$hESC_prediction_rfe_all, hESC.test$Log2FC.2cat_relevel)
+
+# Confusion Matrix and Statistics
+# 
+# Reference
+# Prediction Escapee Subject
+# Escapee     351      35
+# Subject      60     105
+# 
+# Accuracy : 0.8276          
+# 95% CI : (0.7934, 0.8582)
+# No Information Rate : 0.7459          
+# P-Value [Acc > NIR] : 2.966e-06       
+# 
+# Kappa : 0.5704          
+# 
+# Mcnemar's Test P-Value : 0.0138          
+#                                           
+#             Sensitivity : 0.8540          
+#             Specificity : 0.7500          
+#          Pos Pred Value : 0.9093          
+#          Neg Pred Value : 0.6364          
+#              Prevalence : 0.7459          
+#          Detection Rate : 0.6370          
+#    Detection Prevalence : 0.7005          
+#       Balanced Accuracy : 0.8020          
+#                                           
+#        'Positive' Class : Escapee 
+
+#pROC
+
+library(PRROC)
+
+hESC_pred_probs <- predict(hESC_rfe_model.all, hESC.test, type = "prob")[, "Subject"]
+
+hESC_test_binary <- ifelse(hESC.test$Log2FC.2cat_relevel == "Subject", 1, 0)
+
+# Calcule a curva precision-recall
+hESC_pr <- pr.curve(scores.class0 = hESC_pred_probs, weights.class0 = hESC_test_binary, curve = TRUE)
+
+# Mostre PR-AUC
+hESC_pr$auc.integral
+
+# [1] 0.7440456
+
+#Predicted vs real
+hESC_misclassified <- hESC.test %>%
+  dplyr::filter(hESC_prediction_rfe_all != Log2FC.2cat_relevel)
+
+head(hESC_misclassified)
+hESC_misclassified_genes <- hESC_misclassified$gene
+
+
+#Counting where it came from
+hESC_n_rf_data <- sum(hESC_misclassified_genes %in% rf_data$gene)
+hESC_n_rf_tannan <- sum(hESC_misclassified_genes %in% rf_tannan_data$gene)
+
+# Resultado em data.frame
+hESC_source_counts <- data.frame(
+  Source = c("rf_data", "rf_tannan_data"),
+  Misclassified_Count = c(hESC_n_rf_data, hESC_n_rf_tannan)
+)
+
+print(hESC_source_counts)
+
+# Source Misclassified_Count
+# 1        rf_data                  47
+# 2 rf_tannan_data                  48
+
+
+hESC_misclassified_counts <- hESC_misclassified %>%
+  dplyr::mutate(Source = case_when(
+    gene %in% rf_data$gene ~ "rf_data",
+    gene %in% rf_tannan_data$gene ~ "rf_tannan_data",
+    TRUE ~ "Other"
+  )) %>%
+  dplyr::count(Source, Log2FC.2cat_relevel)
+
+print(hESC_misclassified_counts)
+
+# Source Log2FC.2cat_relevel  n
+# 1        rf_data             Escapee 21
+# 2        rf_data             Subject 26
+# 3 rf_tannan_data             Escapee 39
+# 4 rf_tannan_data             Subject 9
+
+#Correctly classified
+
+hESC_classified <- hESC.test %>%
+  dplyr::filter(hESC_prediction_rfe_all == Log2FC.2cat_relevel)
+
+hESC_classified_genes <- hESC_classified$gene
+
+#Counting where it came from
+hESC_n_rf_data_correct <- sum(hESC_classified_genes %in% rf_data$gene)
+hESC_n_rf_tannan_correct <- sum(hESC_classified_genes %in% rf_tannan_data$gene)
+
+# Resultado em data.frame
+hESC_source_counts_correct <- data.frame(
+  Source = c("rf_data", "rf_tannan_data"),
+  classified_Count = c(hESC_n_rf_data_correct, hESC_n_rf_tannan_correct)
+)
+
+print(hESC_source_counts_correct)
+
+# Source classified_Count
+# 1        rf_data              234
+# 2 rf_tannan_data              222
+
+
+hESC_classified_counts <- hESC_classified %>%
+  dplyr::mutate(Source = case_when(
+    gene %in% rf_data$gene ~ "rf_data",
+    gene %in% rf_tannan_data$gene ~ "rf_tannan_data",
+    TRUE ~ "Other"
+  )) %>%
+  dplyr::count(Source, Log2FC.2cat_relevel)
+
+print(hESC_classified_counts)
+
+# Source Log2FC.2cat_relevel   n
+# 1        rf_data             Escapee 222
+# 2        rf_data             Subject  12
+# 3 rf_tannan_data             Escapee 129
+# 4 rf_tannan_data             Subject  93
+
+
+hESC_genes_rf_data <- sum(hESC.test$gene %in% rf_data$gene) #281 genes
+hESC_genes_rf_tannan <- sum(hESC.test$gene %in% rf_tannan_data$gene) #270 genes
+
+
+#Amount of genes 
+
+#rf_data = 281 genes in total, 234 correctly classified -> 83,27% correctly classified
+#rf_tannan = 270 genes in total, 222 correctly classified -> 82,22% correctly classified
+
+
+#Variable importance
+
+varImpPlot(hESC_rfe_model.all,
+           sort = T,
+           type = 1,
+           main = "Variable Importance")
+
+
+hESC_imp_df <- importance(hESC_rfe_model.all, type = 1) %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Variable") 
+hESC_imp_df <- hESC_imp_df %>%
+  arrange(desc(MeanDecreaseAccuracy))
+
+hESC_imp_df$Variable
+
+hESC_imp_df <- hESC_imp_df %>%
+  mutate(Variable = recode(Variable, !!!nice_names_EN))
+
+hESC_imp_df <- hESC_imp_df %>%
+  arrange(MeanDecreaseAccuracy) %>%
+  mutate(Variable = factor(Variable, levels = Variable))
+
+
+
+# Plot
+
+p <- ggplot2::ggplot(hESC_imp_df, ggplot2::aes(x = Variable, y = MeanDecreaseAccuracy, fill = MeanDecreaseAccuracy)) +
+  ggplot2::geom_col(show.legend = FALSE, width = 0.7) +
+  ggplot2::coord_flip() +
+  ggplot2::scale_fill_gradient(low = "skyblue3", high = "deeppink4") +
+  ggplot2::labs(
+    title = "Variable Importance (Mean Decrease Accuracy)",
+    x = NULL,
+    y = "Mean Decrease Accuracy"
+  ) +
+  ggplot2::theme_minimal(base_size = 14) +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(hjust = 0.5, face = "bold"),
+    axis.text.y = ggplot2::element_text(size = 12, margin = ggplot2::margin(r = 10)),
+    panel.grid.major.y = ggplot2::element_blank()
+  )
+
+ggsave(filename = "hESC_variable_importance_RFE_model.png",
+       plot = p,                             
+       width = 10, height = 8,                
+       dpi = 300)                             
+
+
+################################################################################
+# Clustering
+################################################################################
+
+#Using the same data from the hESC model
+
+hESC_data_downsampled <- read.delim("~/Desktop/UNIFESP/silico_autosomes/hESC_full_set_downsampled_for_clustering.txt", header=TRUE)
+
+hESC_data_downsampled_genes <- hESC_data_downsampled$gene
+
+set.seed(123)
+
+all.data.downsampled <- data_join %>% filter (gene %in% hESC_data_downsampled_genes) #934 genes
+
+
+#Step 14: Clustering using k-medoids
+all.data.downsampled$Log2FC.2cat_relevel <- as.factor(all.data.downsampled$Log2FC.2cat_relevel)
+
+#Whole model
+set.seed(123)
+
+fit.data <- randomForest(
+  x = all.data.downsampled[, predictors],
+  y = all.data.downsampled$Log2FC.2cat_relevel,
+  ntree = 1000,
+  importance = TRUE,
+  proximity = TRUE
+)
+
+print(fit.data)
+
+# Call:
+#   randomForest(x = all.data.downsampled[, predictors], y = all.data.downsampled$Log2FC.2cat_relevel,      ntree = 1000, importance = TRUE, proximity = TRUE) 
+# Type of random forest: classification
+# Number of trees: 1000
+# No. of variables tried at each split: 5
+# 
+# OOB estimate of  error rate: 21.2%
+# Confusion matrix:
+#   Escapee Subject class.error
+# Escapee     383      84   0.1798715
+# Subject     114     353   0.2441113
+
+
+# Proximity matrix
+proximity_matrix_1 <- fit.data$proximity
+
+# dissimilarity matrix
+diss_matrix_1  <- 1 - proximity_matrix_1
+
+
+####Analyzing the "optimal"number of clusters"
+
+library(cluster)
+
+D <- dist(diss_matrix_1)
+
+k_values <- 2:10
+
+inertia <- c()
+sil_width <- c()
+
+for (k in k_values) {
+  pam_fit <- pam(D, k = k, diss = TRUE)
+  
+  #Inertia (elbow)
+  inertia <- c(inertia, pam_fit$objective[1])
+  
+  #Silhouette 
+  sil <- silhouette(pam_fit$clustering, D)
+  sil_width <- c(sil_width, mean(sil[, 3]))
+}
+
+#Inertia
+plot(k_values, inertia, type = "b", pch = 19,
+     xlab = "k", ylab = "Total Inertia")
+
+#Silhouette
+plot(k_values, sil_width, type = "b", pch = 19,
+     xlab = "k", ylab = "Average Silhouette Width")
+
+
+best_k <- k_values[which.max(sil_width)]
+best_k
+
+data.frame(k = k_values, sil_width)
+
+#Comment: k around 3 gives me the "best" elbow, but around 2 has the highest silhouette. I will do it as 2
+
+#k-medoids
+kmedoids_cluster_1 <- pam(as.dist(diss_matrix_1), k = 2)
+
+# View clustering
+print(kmedoids_cluster_1$clustering)
+k.medoids_4 <- kmedoids_cluster_1$clustering
+
+data <- cbind(all.data.downsampled, 
+                Real = all.data.downsampled$Log2FC.2cat_relevel)
+# Adding clusters to the data
+data$k_medoids_cluster <- as.factor(k.medoids_4)
+
+# Table with clusters
+View(data)
+
+##Adding predicted class as well
+
+data_predicted <- cbind(fit.data$votes,data)
+
+data_predicted$Predicted <- as.factor(fit.data$predicted)
+
+#Z-score
+
+data.Z.score_1 <- data_predicted
+names(data.Z.score_1)
+
+data.Z.score_1[, c(4:7,9:37)] <- scale(data.Z.score_1[, c(4:7,9:37)])
+data.Z.score_1$k_medoids_cluster <- as.factor(data.Z.score_1$k_medoids_cluster)
+
+Cluster <- data.Z.score_1$k_medoids_cluster
+numerical_data <- data.Z.score_1[, c(4:7,9:37)]
+
+rownames(numerical_data) <- paste0("gene_", 1:nrow(numerical_data), "_", data.Z.score_1$Real)
+row.names(numerical_data)
+
+write.table (data.Z.score_1, file="k-medoids_full_model_gm12878", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+
+
+#Ordered by cluster
+
+annotation <- data.frame(Cluster = Cluster)
+rownames(annotation) <- rownames(numerical_data)
+
+annotation_colors <- list(Cluster = c("1" = "red", "2" = "blue"))
+
+#Checking NAs
+sum(is.na(numerical_data)) 
+sum(is.na(annotation$Cluster)) 
+
+#Ordering
+class(annotation$Cluster)
+
+ordered_indices <- order(annotation$Cluster)
+numerical_data_ordered <- numerical_data[ordered_indices, ]
+annotation_ordered <- annotation[ordered_indices, , drop = FALSE]
+
+head(numerical_data_ordered)
+head(annotation_ordered)
+
+#Organizing names
+names(numerical_data_ordered)
+
+names(numerical_data_ordered) <- nice_names_EN[names(numerical_data_ordered)]
+
+data.Z.score <- data.Z.score_1[order(data.Z.score_1$k_medoids_cluster), ]
+head(data.Z.score)
+head(numerical_data_ordered)
+
+####################################################################################
+# Heatmap
+####################################################################################
+
+annotation_ordered$Predicted <- data.Z.score$Predicted
+annotation_ordered$Category <- data.Z.score$Real
+
+annotation_colors <- list(Cluster = c("1" = "red", "2" = "blue"), 
+                          Predicted = c("Escapee"="lightcoral", "Subject"="lightblue"),
+                          Category = c("Escapee"="lightcoral", "Subject"="lightblue"))
+
+names(numerical_data_ordered)
+
+#Pheatmap
+
+pheatmap(numerical_data_ordered, 
+         annotation_row = annotation_ordered, 
+         annotation_colors = annotation_colors,
+         show_rownames = FALSE,
+         scale = "row",
+         clustering_method = "complete",
+         cluster_cols = TRUE,
+         cluster_rows = FALSE,
+         main = "Random Forest Clustering - Downsampled data - all",
+         filename = "GM12878_heatmap_RF_downsampled (hESC data).png")
+
+
+
+names(data_predicted)
+length(intersect(rf_data$gene, rf_tannan_data$gene))
+
+
+origin_analysis <-  data_predicted %>%
+  mutate(Source = case_when(
+    gene %in% rf_data$gene ~ "rf_data",
+    gene %in% rf_tannan_data$gene ~ "rf_tannan_data",
+    TRUE ~ "Other"
+  ))
+
+
+origin_analysis <-  origin_analysis %>%
+  mutate(correctly_classified = case_when(
+    Predicted == Real ~ "Yes",
+    Predicted != Real ~ "No",
+    TRUE ~ "Other"
+  ))
+
+table(origin_analysis$k_medoids_cluster,origin_analysis$Source,origin_analysis$Predicted)
+
+# , ,  = Escapee
+# 
+# 
+# rf_data rf_tannan_data
+# 1     304             56
+# 2      27             43
+# 3       5             47
+# 
+# , ,  = Subject
+# 
+# 
+# rf_data rf_tannan_data
+# 1      14              1
+# 2      54            157
+# 3       5            223
+
+
+###############################################################################
+#RFE model 
+
+set.seed(123)
+fit.data.rfe <- randomForest(
+  x = all.data.downsampled[, hESC_predictors_rfe_all],
+  y = all.data.downsampled$Log2FC.2cat_relevel,
+  ntree = 1000,
+  importance = TRUE,
+  proximity = TRUE
+)
+
+
+print(fit.data.rfe) #improved
+
+# Call:
+#   randomForest(x = all.data.downsampled[, hESC_predictors_rfe_all],      y = all.data.downsampled$Log2FC.2cat_relevel, ntree = 1000,      importance = TRUE, proximity = TRUE) 
+# Type of random forest: classification
+# Number of trees: 1000
+# No. of variables tried at each split: 2
+# 
+# OOB estimate of  error rate: 17.24%
+# Confusion matrix:
+#   Escapee Subject class.error
+# Escapee     399      68   0.1456103
+# Subject      93     374   0.1991435
+
+set.seed(123)
+
+# Proximity matrix
+proximity_matrix <- fit.data.rfe$proximity
+
+# dissimilarity matrix
+diss_matrix <- 1 - proximity_matrix
+
+####Analyzing the "optimal"number of clusters"
+
+D <- dist(diss_matrix)
+
+k_values <- 2:10
+
+inertia <- c()
+sil_width <- c()
+
+for (k in k_values) {
+  pam_fit <- pam(D, k = k, diss = TRUE)
+  
+  #Inertia (elbow)
+  inertia <- c(inertia, pam_fit$objective[1])
+  
+  #Silhouette 
+  sil <- silhouette(pam_fit$clustering, D)
+  sil_width <- c(sil_width, mean(sil[, 3]))
+}
+
+#Inertia
+plot(k_values, inertia, type = "b", pch = 19,
+     xlab = "k", ylab = "Total Inertia")
+
+#Silhouette
+plot(k_values, sil_width, type = "b", pch = 19,
+     xlab = "k", ylab = "Average Silhouette Width")
+
+
+best_k <- k_values[which.max(sil_width)]
+best_k
+
+data.frame(k = k_values, sil_width)
+
+#Comment: k around 3 gives me the "best" elbow, but around 2 has the highest silhouette. I will do it as 2
+
+#k-medoids
+kmedoids_cluster <- pam(as.dist(diss_matrix), k = 2)
+
+# View clustering
+print(kmedoids_cluster$clustering)
+k.medoids_3 <- kmedoids_cluster$clustering
+
+data.3 <- cbind(all.data.downsampled[,c("gene", hESC_predictors_rfe_all)], 
+                Real = all.data.downsampled$Log2FC.2cat_relevel)
+# Adding clusters to the data
+data.3$k_medoids_cluster <- as.factor(k.medoids_3)
+
+# Table with clusters
+View(data.3)
+
+##Adding predicted class as well
+
+data.2_predicted <- cbind(fit.data.rfe$votes,data.3)
+
+data.2_predicted$Predicted <- as.factor(fit.data.rfe$predicted)
+
+#Z-score
+
+data.Z.score <- data.2_predicted
+names(data.Z.score)
+
+data.Z.score[, c(4:10)] <- scale(data.Z.score[, c(4:10)])
+data.Z.score$k_medoids_cluster <- as.factor(data.Z.score$k_medoids_cluster)
+
+Cluster <- data.Z.score$k_medoids_cluster
+numerical_data <- data.Z.score[, c(4:10)]
+
+rownames(numerical_data) <- paste0("gene_", 1:nrow(numerical_data), "_", data.Z.score$Real)
+row.names(numerical_data)
+
+write.table (data.Z.score, file="k-means_RFE_gm12878.txt", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+
+
+#Ordered by cluster
+
+annotation <- data.frame(Cluster = Cluster)
+rownames(annotation) <- rownames(numerical_data)
+
+annotation_colors <- list(Cluster = c("1" = "red", "2" = "blue"))
+
+#Checking NAs
+sum(is.na(numerical_data)) 
+sum(is.na(annotation$Cluster)) 
+
+#Ordering
+class(annotation$Cluster)
+
+ordered_indices <- order(annotation$Cluster)
+numerical_data_ordered <- numerical_data[ordered_indices, ]
+annotation_ordered <- annotation[ordered_indices, , drop = FALSE]
+
+head(numerical_data_ordered)
+head(annotation_ordered)
+
+#Organizing names
+names(numerical_data_ordered)
+
+names(numerical_data_ordered) <- nice_names_EN[names(numerical_data_ordered)]
+
+rownames(data.Z.score) <- paste0("gene_", 1:nrow(data.Z.score), "_", data.Z.score$Real)
+
+data.Z.score <- data.Z.score[order(data.Z.score$k_medoids_cluster), ]
+head(data.Z.score)
+head(numerical_data_ordered)
+
+all(rownames(numerical_data_ordered) == rownames(data.Z.score))
+all(rownames(numerical_data_ordered) == rownames(annotation_ordered))
+
+####################################################################################
+# Heatmap
+####################################################################################
+
+annotation_ordered$Predicted <- data.Z.score$Predicted
+annotation_ordered$Category <- data.Z.score$Real
+
+annotation_colors <- list(Cluster = c("1" = "red", "2" = "blue"), 
+                          Predicted = c("Escapee"="lightcoral", "Subject"="lightblue"),
+                          Category = c("Escapee"="lightcoral", "Subject"="lightblue"))
+
+names(numerical_data_ordered)
+
+#Pheatmap
+png("heatmap_RFE_downsampled.png", width = 8, height = 6, units = "in", res = 300)
+pheatmap(numerical_data_ordered, 
+         annotation_row = annotation_ordered, 
+         annotation_colors = annotation_colors,
+         show_rownames=FALSE,
+         scale = "row",  
+         clustering_method = "complete",
+         cluster_cols = TRUE,
+         cluster_rows = FALSE,
+         main = "Random Forest Clustering - Downsampled data - RFE",
+         filename = "GM12878_heatmap_RFE_downsampled (hESC data).png")
+
+#Clustering it by row
+
+pheatmap(numerical_data_ordered, 
+         annotation_row = annotation_ordered, 
+         annotation_colors = annotation_colors,
+         show_rownames=FALSE,
+         scale = "row",  
+         clustering_method = "complete",
+         cluster_cols = FALSE,
+         cluster_rows = TRUE,
+         main = "Random Forest Clustering - Downsampled data - RFE",
+         filename = "GM12878_heatmap_RFE_downsampled (hESC data)_row_clustered.png")
+
+#Clustering it by Real class
+
+annotation_ordered$Predicted <- data.Z.score$Predicted[
+  match(rownames(annotation_ordered), rownames(data.Z.score))
+]
+
+annotation_ordered$Category <- data.Z.score$Real[
+  match(rownames(annotation_ordered), rownames(data.Z.score))
+]
+
+
+
+annotation_ordered$Category <- factor(annotation_ordered$Category,
+                                      levels = c("Subject", "Escapee"))
+
+ordered_indices <- order(annotation_ordered$Category)
+
+numerical_data_ordered <- numerical_data_ordered[ordered_indices, ]
+annotation_ordered <- annotation_ordered[ordered_indices, , drop = FALSE]
+
+
+
+annotation_colors <- list(
+  Cluster = c("1" = "red", "2" = "blue"),
+  Predicted = c("Escapee" = "lightcoral", "Subject" = "lightblue"),
+  Category = c("Escapee" = "lightcoral", "Subject" = "lightblue")
+)
+
+
+stopifnot(all(rownames(numerical_data_ordered) == rownames(annotation_ordered)))
+
+
+pheatmap(
+  numerical_data_ordered,
+  annotation_row = annotation_ordered,
+  annotation_colors = annotation_colors,
+  show_rownames = FALSE,
+  scale = "row",
+  clustering_method = "complete",
+  cluster_cols = FALSE,
+  cluster_rows = FALSE,
+  main = "Random Forest Clustering - Downsampled data - RFE",
+  filename = "Clustering_RFE_by_Class.png"
+)
+
+####################################################################################
+#Saving tables
+####################################################################################
+setwd("~/Desktop/UNIFESP/silico_autosomes/gm12878")
+
+#all_data.trn - used for the split (train x test) - not yet downsampled 
+
+write.table (all_data.trn, file="Gm12878_training_set_not_downsampled.txt", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+
+#all_data.tst - used for testing the model
+
+write.table (all_data.tst, file="Gm12878_test_set.txt", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+
+write.table (hESC_all_test, file="Gm12878_test_set_with_hESC.txt", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+
+
+#all_train.downsampled - used for training the model with balanced classes
+
+write.table (all_train.downsampled, file="Gm12878_training_downsampled_set.txt", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+
+####################################################################################
+#Presentation of data
+####################################################################################
+
+###########################################################################3
+# Boxplots
+#############################################################################
+
+
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+names(data.Z.score)
+
+#PRC1 features
+
+data_long <- data.Z.score %>%
+  pivot_longer(
+    cols = c(
+      number_of_unmethylated,
+      mean0_DNASE.gm12878,
+      mean0_EZH2.gm12878,
+      distance_XIST_linear,
+      ALU_density,
+      LINE_density,
+      gene_density),
+    
+    names_to = "Feature",
+    values_to = "Z_score"
+  ) %>%
+  mutate(
+    Feature = recode(
+      Feature,
+      "number_of_unmethylated" = "#unmethylated Cs",
+      "mean0_DNASE.gm12878" = "DNAse hypersensitivity",
+      "mean0_EZH2.gm12878" = "EZH2",
+      "distance_XIST_linear" = "Linear distance to XIST",
+      "ALU_density" = "Alu density",
+      "LINE_density" = "LINE density",
+      "gene_density" = "Gene density"
+    ))
+
+#Figure 4f
+
+p <- ggplot(data_long, aes(x = k_medoids_cluster, y = Z_score, fill = k_medoids_cluster)) +
+  geom_violin(size = .3, bw = .1, scale = "count") +
+  geom_jitter(position = position_jitter(width = 0.2),
+              size = 0.2, alpha = 0.15, color = "black") +
+  scale_fill_manual(values = c("1" = "red", 
+                               "2" = "blue")) +
+  labs(x = "Cluster", y = "Z-score") +
+  facet_wrap(~ Feature, scales = "free_y", nrow = 2) +
+  theme_minimal(base_size = 13) +
+  theme(
+    strip.text = element_text(size = 11, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+    legend.position = "right",                           
+    plot.margin = margin(10, 10, 10, 10))+
+  coord_cartesian(ylim = c(-2, 5))
+
+print(p)
+
+ggsave("Zscore_violinplots_facets_all.png", plot = p, width = 9, height = 4, dpi = 600)
+
+#Figure 4g
+
+p <- ggplot(data_long, aes(x = Real, y = Z_score, fill = Real)) +
+  geom_violin(size = .3, bw = .1, scale = "count") +
+  geom_jitter(position = position_jitter(width = 0.2),
+              size = 0.2, alpha = 0.15, color = "black") +
+  scale_fill_manual(values = c("Escapee" = "lightcoral", "Subject" = "lightblue")) +
+  labs(x = "Class", y = "Z-score") +
+  facet_wrap(~ Feature, scales = "free_y", nrow = 2) +
+  theme_minimal(base_size = 13) +
+  theme(
+    strip.text = element_text(size = 11, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+    legend.position = "right",                           
+    plot.margin = margin(10, 10, 10, 10))+
+  coord_cartesian(ylim = c(-2, 5))
+
+print(p)
+
+ggsave("Zscore_violinplots_facets_all_byReal_class.png", plot = p, width = 9, height = 4, dpi = 600)
+
+
+
+
