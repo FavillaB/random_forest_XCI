@@ -1,0 +1,848 @@
+################################################################################################
+#Bala Tannan et al. 2014 table preparation
+
+library(randomForest)
+library(caret)
+library(dbplyr)
+library(plyr)
+library(GenomicRanges)
+library("biomaRt")
+library(cluster)
+library(pheatmap)
+library(rtracklayer)
+library(dplyr)
+################################################################################################
+
+#Preparation of table for in silico analysis: analysis will be based on the location of the genes and overlap of features
+
+setwd("/Users/Bih/Desktop/silico/validation/")
+
+tannan_all_genes <- read.delim("~/Desktop/silico/validation/tannan_all_genes.txt", header=FALSE)
+
+names(tannan_all_genes) <- c("chr_name", "start_hg18", "end_hg18", "strand", "hgnc_symbol", "gene_size", "refseq_id","status","coordinate_bp")
+
+################################################################################################
+
+#Step 3: annotation of the table
+
+##Annotation with gene start/end
+all.patients.tannan.gb.hg19_dedup <- read.delim("~/Desktop/silico/validation/all.patients.tannan.gb.hg19_dedup_whole.gene.bed", header=FALSE)
+View(all.patients.tannan.gb.hg19_dedup)
+
+genes_gb <- as.character(all.patients.tannan.gb.hg19_dedup$V4)
+listAttributes(human.hg19)
+
+options(timeout = 300)
+
+all.patients.tannan.gb.hg19 <- getBM(attributes = c("chromosome_name", "start_position", "end_position", "hgnc_symbol", "strand"),
+                                     filters = "hgnc_symbol", values = genes_gb, mart = human.hg19)
+
+#Adding chromosome to the data
+
+all.patients.tannan.gb.hg19$chromosome_name<-paste("chr",all.patients.tannan.gb.hg19$chromosome_name, sep="")
+View(all.patients.tannan.gb.hg19)
+
+names(all.patients.tannan.gb.hg19) <- c("chr","start","end","gene", "strand")
+
+#Removing duplicates
+all.patients.tannan.gb.hg19_dedup <- all.patients.tannan.gb.hg19 %>%
+  distinct(gene, .keep_all = TRUE)
+
+###################################################################################
+#Summary: all.patients.tannan.gb.hg19_dedup contains 914 genes annotated in gene body in bed format
+
+#This is the "gene body" file
+
+write.table (all.patients.tannan.gb.hg19_dedup , file="all.patients.tannan.hg19_dedup_whole.gene.bed", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+
+###################################################################################
+
+##Annotation with TSS file from SwitchGear Genomics Transcription Start Sites - downloaded using table browser from UCSC
+
+hg19_TSS <- read.delim("~/Desktop/silico/hESC_LRS/hg19_TSS")
+hg19_genes_unique <- all.patients.tannan.gb.hg19_dedup
+names(hg19_genes_unique) <- c("chr", "start", "end", "gene", "strand")
+hg19_genes_unique$strand <- ifelse(hg19_genes_unique$strand == -1, "-", "+")
+
+#Filtering for non-pseudo gene is.pseudo = 0
+
+hg19_TSS_filtered <- subset(hg19_TSS,hg19_TSS$isPseudo==0)
+
+
+# Assuming the hg19_genes_unique and hg19_TSS data have already been loaded correctly in R
+
+# Creating the GRanges for the genes
+gr_genes <- GRanges(
+  seqnames = hg19_genes_unique$chr,                      # Chromosome names for the genes
+  ranges = IRanges(start = hg19_genes_unique$start, end = hg19_genes_unique$end), # Start and end coordinates
+  strand = hg19_genes_unique$strand,                     # Strand (+ or -)
+  hgnc_symbol = hg19_genes_unique$gene            # Gene name
+)
+
+# Creating the GRanges for the TSS
+gr_TSS <- GRanges(
+  seqnames = hg19_TSS_filtered$chrom,                             # Chromosome names for the TSS
+  ranges = IRanges(start = hg19_TSS_filtered$chromStart, end = hg19_TSS_filtered$chromEnd), # Start and end coordinates
+  strand = hg19_TSS_filtered$strand                               # Strand (+ or -)
+)
+
+# Function to create an annotated dataframe with genes and TSS
+create_annotated_df <- function(gr_genes, gr_TSS) {
+  # Check if the GRanges objects are not empty
+  if (length(gr_genes) == 0 || length(gr_TSS) == 0) {
+    stop("The GRanges objects for genes or TSS are empty!")
+  }
+  
+  # Find the nearest TSS indices based on specific rules
+  nearest_indices <- sapply(seq_along(gr_genes), function(i) {
+    # Check the strand of the current gene
+    gene <- gr_genes[i]
+    
+    # Ensure strand values are valid
+    gene_strand <- as.character(strand(gene)) # Convert to character for comparison
+    if (gene_strand == "+") {
+      # For positive strand, consider the start of the gene
+      nearest_TSS <- which.min(abs(start(gr_TSS) - start(gene)))
+    } else if (gene_strand == "-") {
+      # For negative strand, consider the end of the gene
+      nearest_TSS <- which.min(abs(end(gr_TSS) - end(gene)))
+    } else {
+      # Handle unexpected strand values (e.g., NA or other)
+      nearest_TSS <- NA
+    }
+    return(nearest_TSS)
+  })
+  
+  # Check if the nearest indices are valid (not NA)
+  valid_indices <- !is.na(nearest_indices)
+  
+  # Assign TSS values to genes, handling invalid indices
+  nearest_TSS_start <- ifelse(valid_indices, start(gr_TSS)[nearest_indices], NA)
+  nearest_TSS_end <- ifelse(valid_indices, end(gr_TSS)[nearest_indices], NA)
+  
+  # Create the annotated dataframe with all genes, including those without TSS matches
+  annotated_df <- data.frame(
+    chr = as.character(seqnames(gr_genes)),
+    start = start(gr_genes),
+    end = end(gr_genes),
+    gene_name = mcols(gr_genes)$hgnc_symbol,
+    strand = as.character(strand(gr_genes)),
+    nearest_TSS_start = nearest_TSS_start,
+    nearest_TSS_end = nearest_TSS_end
+  )
+  
+  return(annotated_df)
+}
+
+# Filtering genes and TSS by strand
+gr_genes_positive <- gr_genes[strand(gr_genes) == "+"]
+gr_genes_negative <- gr_genes[strand(gr_genes) == "-"]
+
+gr_TSS_positive <- gr_TSS[strand(gr_TSS) == "+"]
+gr_TSS_negative <- gr_TSS[strand(gr_TSS) == "-"]
+
+# Check the number of genes and TSS
+cat("Number of genes on positive strand:", length(gr_genes_positive), "\n")
+cat("Number of TSS on positive strand:", length(gr_TSS_positive), "\n")
+
+# Create the annotated dataframe for the positive strand
+annotated_positive <- create_annotated_df(gr_genes_positive, gr_TSS_positive)
+
+# Create the annotated dataframe for the negative strand
+annotated_negative <- create_annotated_df(gr_genes_negative, gr_TSS_negative)
+
+# Combine the results for both strands
+annotated_genes_hg19_TSS <- rbind(annotated_positive, annotated_negative)
+
+#Creating TSS -/+ 1 kb
+
+#hg19
+
+annotated_genes_hg19_TSS_bed_range <- subset(annotated_genes_hg19_TSS, select= c(1,6,7,4))
+annotated_genes_hg19_TSS_bed_range$nearest_TSS_start <- annotated_genes_hg19_TSS_bed_range$nearest_TSS_start - 1000
+annotated_genes_hg19_TSS_bed_range$nearest_TSS_end <- annotated_genes_hg19_TSS_bed_range$nearest_TSS_end + 1000
+write.table (annotated_genes_hg19_TSS_bed_range , file="all.patients.tannan_TSS.hg19.bed ", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+
+#hg38
+
+#GenomicRanges in hg38
+
+annotated_genes_hg19_TSS_bed <- subset(annotated_genes_hg19_TSS, select= c(1,6,7,4))
+
+annotated_genes_hg19_TSS_bed$nearest_TSS_start <- as.numeric(annotated_genes_hg19_TSS_bed$nearest_TSS_start)
+annotated_genes_hg19_TSS_bed$nearest_TSS_end <- as.numeric(annotated_genes_hg19_TSS_bed$nearest_TSS_end)
+
+chain_file <- "/Users/Bih/Desktop/LRS_methylation/hg19ToHg38.over.chain"
+chain.to.hg38 <- import.chain(chain_file)
+
+gr_hg19_genes <- GRanges(
+  seqnames = annotated_genes_hg19_TSS_bed$chr,
+  ranges = IRanges(
+    start = annotated_genes_hg19_TSS_bed$nearest_TSS_start,
+    end = annotated_genes_hg19_TSS_bed$nearest_TSS_end
+  ),
+  gene = annotated_genes_hg19_TSS_bed$gene_name)
+
+#Converting to hg38
+gr_hg38_genes_list <- liftOver(gr_hg19_genes, chain.to.hg38)
+
+gr_hg38_genes <- unlist(gr_hg38_genes_list)
+
+if (length(gr_hg38_genes) < length(gr_hg19_genes)) {
+  message("Algumas coordenadas não puderam ser convertidas.")
+} else
+  message("Tudo Certo!")
+
+#Creating hg38 data
+
+annotated_genes_hg38_TSS_bed_range <- data.frame(
+  chr = as.character(seqnames(gr_hg38_genes)),
+  start = start(gr_hg38_genes),
+  end = end(gr_hg38_genes),
+  hgnc_symbol = gr_hg38_genes$gene  #904 genes
+)
+
+annotated_genes_hg38_TSS_bed_range$start <- annotated_genes_hg38_TSS_bed_range$start - 1000
+annotated_genes_hg38_TSS_bed_range$end <- annotated_genes_hg38_TSS_bed_range$end + 1000
+write.table (annotated_genes_hg38_TSS_bed_range , file="all.patients.tannan_TSS.hg38.bed ", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+
+###################################################################################
+#Summary: all.patients.tannan_TSS.hg38.bed and all.patients.tannan_TSS.hg19.bed contains 868/870 genes annotated according to TSS in bed format
+
+#This is the "TSS" file
+
+###################################################################################
+#Step 5: Checking distance from XIST (hg19)
+###################################################################################
+
+#Rearrangements
+
+#chr3: XIST - Xq27.3 - 3p26.2 - 3pter
+
+#XIST: 73.040.486-73.072.558 (considering 73.040.486)
+#Xq27.3: 142.100.001-147.100.000 (considering 147.100.000)
+#3p26.2:2.800.001 - 4.000.000 (considering 4.000.000)
+#3pter: 1
+
+#XIST to Xq27: 74.059.514
+
+147100000 - 73040486
+
+#3p26.2-pter: 3.999.999
+
+4000000 - 1
+
+#Distance to XIST for this rearrangement: XIST to Xq27 + 3p26.2-pter - TSS start
+
+#74.059.514+3.999.999-TSS start
+
+
+#chr7: XIST - Xq27 - 7q31 - 7qter
+
+#XIST: 73.040.486-73.072.558 (considering 73.040.486)
+#Xq27: 138.000.001-140.300.000 (considering 140.300.000)
+#7q31:107.400.001 - 114.600.000 (considering 114.600.000)
+#7qter
+
+#XIST to Xq27: 67.259.514
+
+140300000 - 73040486
+
+#Distance to XIST for this rearrangement: XIST to Xq27 + TSS start
+
+#67259514 + TSS_start
+
+
+#chr10: XIST - Xq26.3 - 10q23.3 - 10qter
+
+#XIST: 73.040.486-73.072.558 (considering 73.040.486)
+#Xq26.3: 133.600.001-138.300.000 (considering 138.000.000)
+#10q23.3:89.500.001 - 92.900.000 (considering 92.900.000)
+#10qter
+
+#XIST to Xq26.3: 64959514
+
+138000000 - 73040486
+
+#Distance to XIST for this rearrangement: XIST to Xq26.3 + TSS start
+
+#64959514 + TSS_start
+
+
+#chr11: XIST - Xq26 - 11p12 - 11pter 
+
+#XIST: 73.040.486-73.072.558 (considering 73.040.486)
+#Xq26: 128.700.001-130.400.000 (considering 130.400.000)
+#11p12:36.400.001 - 43.500.000 (considering 43.500.000)
+#11pter: 1
+
+#XIST to Xq26: 57359514
+
+130400000 - 73040486
+
+#11p12-pter: 43499999
+
+43500000 - 1
+
+#Distance to XIST for this rearrangement: XIST to Xq26 + 11p12-pter - TSS start
+
+#73040486+43499999-TSS start
+
+
+#chr14: XIST - Xq13.3 - 14q24 - 14qter
+
+#XIST: 73.040.486-73.072.558 (considering 73.040.486)
+#Xq13.3: 73.900.001 - 76.000.000 (considering 76.000.000)
+#14q24:67.900.001 - 70.200.000 (considering 70.200.000)
+#14qter
+
+#XIST to Xq13.3: 2.959.514
+
+76000000 - 73040486
+
+#Distance to XIST for this rearrangement: XIST to Xq26.3 + TSS start
+
+#2959514 + TSS_start
+
+#chr20: XIST - Xq26.3 - 20q13 - qter
+
+#XIST: 73.040.486-73.072.558 (considering 73.040.486)
+#Xq26.3: 133.600.001-138.300.000 (considering 138.000.000)
+#20q13:41.700.001 - 42.100.000 (considering 42.100.000)
+#20qter
+
+#XIST to Xq26.3: 64959514
+
+138000000 - 73040486
+
+#Distance to XIST for this rearrangement: XIST to Xq26.3 + TSS start
+
+#64959514 + TSS_start
+
+###################################################################################
+#Summary - distance from XIST
+
+#chr3: 74059514+3999999-TSS start
+#chr7: 67259514+TSS_start
+#chr10: 64959514+TSS_start
+#chr11: 73040486+43499999-TSS start
+#chr14: 2959514+TSS_start
+#chr20: 64959514 + TSS_start
+
+################################################################################
+#Step 6 : computing distance from XIST
+
+View(annotated_genes_hg19_TSS_bed)
+
+#1. reorganize table based on chr. and separate each chromosome in different tables
+
+tannan.table <- annotated_genes_hg19_TSS_bed[order(annotated_genes_hg19_TSS_bed$chr),]
+
+#Subset chromosomes
+
+tannan.table_chr3 <- subset(tannan.table, tannan.table$chr=="chr3")
+tannan.table_chr7 <- subset(tannan.table, tannan.table$chr=="chr7")
+tannan.table_chr10 <- subset(tannan.table, tannan.table$chr=="chr10")
+tannan.table_chr11 <- subset(tannan.table, tannan.table$chr=="chr11")
+tannan.table_chr14 <- subset(tannan.table, tannan.table$chr=="chr14")
+tannan.table_chr20 <- subset(tannan.table, tannan.table$chr=="chr20")
+
+#numeric 
+
+tannan.table_chr3_start <- as.numeric(tannan.table_chr3$nearest_TSS_start)
+tannan.table_chr7_start <- as.numeric(tannan.table_chr7$nearest_TSS_start)
+tannan.table_chr10_start <- as.numeric(tannan.table_chr10$nearest_TSS_start)
+tannan.table_chr11_start <- as.numeric(tannan.table_chr11$nearest_TSS_start)
+tannan.table_chr14_start <- as.numeric(tannan.table_chr14$nearest_TSS_start)
+tannan.table_chr20_start <- as.numeric(tannan.table_chr20$nearest_TSS_start)
+
+
+#For each chromosome
+
+distance.XIST.chr3 <- 74059514+3999999-tannan.table_chr3_start
+distance.XIST.chr7 <- 67259514+tannan.table_chr7_start
+distance.XIST.chr10 <- 64959514+tannan.table_chr10_start
+distance.XIST.chr11 <- 73040486+43499999-tannan.table_chr11_start
+distance.XIST.chr14 <- 2959514+tannan.table_chr14_start
+distance.XIST.chr20 <- 64959514+tannan.table_chr20_start
+
+#Binding to the table
+
+#chr3
+tannan.table_chr3_XIST <- cbind(tannan.table_chr3,distance.XIST.chr3)
+names(tannan.table_chr3_XIST) <- c("chr", "TSS_start", "TSS_end", "gene", "distance_XIST_linear")
+
+#chr7
+tannan.table_chr7_XIST <- cbind(tannan.table_chr7,distance.XIST.chr7)
+names(tannan.table_chr7_XIST) <- c("chr", "TSS_start", "TSS_end", "gene", "distance_XIST_linear")
+
+#chr10
+tannan.table_chr10_XIST <- cbind(tannan.table_chr10,distance.XIST.chr10)
+names(tannan.table_chr10_XIST) <- c("chr", "TSS_start", "TSS_end", "gene", "distance_XIST_linear")
+
+#chr11
+tannan.table_chr11_XIST <- cbind(tannan.table_chr11,distance.XIST.chr11)
+names(tannan.table_chr11_XIST) <- c("chr", "TSS_start", "TSS_end", "gene", "distance_XIST_linear")
+
+#chr14
+tannan.table_chr14_XIST <- cbind(tannan.table_chr14,distance.XIST.chr14)
+names(tannan.table_chr14_XIST) <- c("chr", "TSS_start", "TSS_end", "gene", "distance_XIST_linear")
+
+#chr20
+tannan.table_chr20_XIST <- cbind(tannan.table_chr20,distance.XIST.chr20)
+names(tannan.table_chr20_XIST) <- c("chr", "TSS_start", "TSS_end", "gene", "distance_XIST_linear")
+
+################################################################################
+#Step 7: Joining tables
+
+distance.XIST.all_tannan <- rbind(tannan.table_chr3_XIST,tannan.table_chr7_XIST,tannan.table_chr10_XIST,tannan.table_chr11_XIST,tannan.table_chr14_XIST,tannan.table_chr20_XIST)
+
+write.table (distance.XIST.all_tannan , file="distance.XIST_tannan.txt", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+
+################################################################################
+
+#Step 8: Classification 
+
+tannan_all_genes_data<-subset(tannan_all_genes,select=c(5,8))
+names(tannan_all_genes_data) <- c("gene", "Log2FC.2cat_relevel") 
+distance.XIST.all_tannan_complete <- distance.XIST.all_tannan %>%
+  left_join(tannan_all_genes_data, by = "gene")
+
+sum(duplicated(distance.XIST.all_tannan_complete$gene))
+
+################################################################################
+
+#Step 9: Adding extra features
+
+View(distance.XIST.all_tannan_complete) 
+
+#Annotation of ALU, LINE and etc
+
+#Genes in region
+
+genes <- getBM(attributes = c('ensembl_gene_id', 'external_gene_name', 'chromosome_name',
+                              'start_position', 'end_position', 'strand', 'gene_biotype'),
+               mart = human.hg19)
+
+#Lines/Alu
+
+line_elements <- read.table("/Users/Bih/Desktop/silico/hESC/final/all_LINE_elements", header = TRUE)
+alu_elements <- read.table ("/Users/Bih/Desktop/silico/hESC/final/all_Alu_elements", header=TRUE)
+
+#Adding chromosome
+genes$chromosome_name <- paste("chr", genes$chromosome_name, sep="")
+
+#Genomic segments
+
+intervals_data <- distance.XIST.all_tannan_complete
+
+#700 kb around the TSS (annotate -349.000 for TSS_start and +349.000 bp) for repeats and 1 MB around the TSS for genes (-499000/+499000) 
+
+names(intervals_data)
+
+intervals_data$TSS_start <- as.numeric(intervals_data$TSS_start)
+intervals_data$TSS_end <- as.numeric(intervals_data$TSS_end)
+
+intervals_data <- intervals_data %>%
+  mutate(TSS_repeats_start = TSS_start - 349000,
+         TSS_repeats_end = TSS_end + 349000,
+         TSS_genes_start = TSS_start - 499000,
+         TSS_genes_end = TSS_end + 499000)
+
+#GRanges for intervals
+intervals_granges.genes <- GRanges(seqnames = intervals_data$chr,
+                                   ranges = IRanges(start = intervals_data$TSS_genes_start,
+                                                    end = intervals_data$TSS_genes_end))
+
+intervals_granges.repeats <- GRanges(seqnames = intervals_data$chr,
+                                     ranges = IRanges(start = intervals_data$TSS_repeats_start,
+                                                      end = intervals_data$TSS_repeats_end))
+
+#GRanges for genes position
+gene_granges <- GRanges(seqnames = genes$chromosome_name,
+                        ranges = IRanges(start = genes$start_position,
+                                         end = genes$end_position))
+
+#GRanges for Lines position
+gene_granges.line <- GRanges(seqnames = line_elements$genoName,
+                             ranges = IRanges(start = line_elements$genoStart,
+                                              end = line_elements$genoEnd))
+
+gene_granges.alu <- GRanges(seqnames = alu_elements$genoName,
+                            ranges = IRanges(start = alu_elements$genoStart,
+                                             end = alu_elements$genoEnd))
+
+#Counting overlaps
+
+overlap_counts.gene <- countOverlaps(intervals_granges.genes, gene_granges)
+overlap_counts.line <- countOverlaps(intervals_granges.repeats, gene_granges.line)
+overlap_counts.alu <- countOverlaps(intervals_granges.repeats, gene_granges.alu)
+
+intervals_data <- intervals_data %>%
+  mutate(number_of_genes_in_interval = overlap_counts.gene,
+         gene_interval_length = TSS_genes_end - TSS_genes_start,
+         gene_density = number_of_genes_in_interval/gene_interval_length,
+         number_of_LINES_in_interval = overlap_counts.line,
+         repeats_interval_length = TSS_repeats_end - TSS_repeats_start,
+         LINE_density = number_of_LINES_in_interval/repeats_interval_length,
+         number_of_Alu_in_interval = overlap_counts.alu,
+         ALU_density = number_of_Alu_in_interval/repeats_interval_length)
+
+write.table (intervals_data, file="tannan_all_genes_LINE_genes_Alu_annotation.txt", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+names(intervals_data)
+
+##Adding extra features
+enhancers <- read.table("/Users/Bih/Downloads/enhancer_data", header = TRUE) #for number of enhancers - 1kb 
+cpg <- read.table("/Users/Bih/Downloads/CpG_data") #for overlap with CpG island - 1 kb
+
+names(cpg) <- c("bin", "chrom", "chromStart", "chromEnd", "Cpg", "Cpg_name", "length", "cpgNum", "gcNum", "perCpg", "perGc", "obsExp")
+
+methylation <- read.table("/Users/Bih/Downloads/methylation_hESC", header = TRUE) #for number of methylated/unmethylated/partially methylated Cs - 1 kb
+# 255,127,0 = orange (methylated)
+# 128,0,128 = purple (partially methylated)
+# 0,0,205 = blue (unmethylated)
+
+methylation.methylated <- subset(methylation, methylation$itemRgb == "255,127,0")
+methylation.partial.methylated <- subset(methylation, methylation$itemRgb == "128,0,128")
+methylation.unmethylated <- subset(methylation, methylation$itemRgb == "0,0,205")
+
+tad <- read.table("/Users/Bih/Desktop/silico/hESC/complete_pipeline/TADs_akdemir_hg19.txt", header=TRUE) #Overlap with each TAD
+unique(tad$Type) #five levels: "Low", "Repressed", "Heterochromatin", "Low-active", and "Active" 
+
+# GRanges for TSS position
+gene_granges <- GRanges(seqnames = intervals_data$chr,
+                        ranges = IRanges(start = intervals_data$TSS_start,
+                                         end = intervals_data$TSS_end)) #+/- 1Kb
+
+# GRanges for the rest
+granges.enhancers <- GRanges(seqnames = enhancers$chrom,
+                             ranges = IRanges(start = enhancers$chromStart,
+                                              end = enhancers$chromEnd))
+
+granges.cpg <- GRanges(seqnames = cpg$chrom,
+                       ranges = IRanges(start = cpg$chromStart,
+                                        end = cpg$chromEnd))
+
+granges.methylated <- GRanges(seqnames = methylation.methylated$chrom,
+                              ranges = IRanges(start = methylation.methylated$chromStart,
+                                               end = methylation.methylated$chromEnd))
+
+granges.partially.methylated <- GRanges(seqnames = methylation.partial.methylated$chrom,
+                                        ranges = IRanges(start = methylation.partial.methylated$chromStart,
+                                                         end = methylation.partial.methylated$chromEnd))
+
+granges.unmethylated <- GRanges(seqnames = methylation.unmethylated$chrom,
+                                ranges = IRanges(start = methylation.unmethylated$chromStart,
+                                                 end = methylation.unmethylated$chromEnd))
+
+granges.tad <- GRanges(seqnames = tad$chromosome,
+                       ranges = IRanges(start = tad$start,
+                                        end = tad$end),
+                       Type=tad$Type)
+
+# Counting overlaps
+overlap_counts.enhancers <- countOverlaps(gene_granges, granges.enhancers)
+overlap_counts.cpg <- countOverlaps(gene_granges, granges.cpg)
+overlap_counts.methylated <- countOverlaps(gene_granges, granges.methylated)
+overlap_counts.partially.methylated <- countOverlaps(gene_granges, granges.partially.methylated)
+overlap_counts.unmethylated <- countOverlaps(gene_granges, granges.unmethylated)
+overlap_tads <- findOverlaps(gene_granges,granges.tad)
+
+#Adding TAD data to original table
+
+hESC.table_tannan <- intervals_data
+
+hESC.table_tannan$TAD_Type <- rep("none", nrow(hESC.table_tannan)) # Criar coluna TAD_Type com valores NA por padrão
+hESC.table_tannan$TAD_Type[queryHits(overlap_tads)] <- mcols(granges.tad)$Type[subjectHits(overlap_tads)]
+
+hESC.table_tannan <- hESC.table_tannan %>%
+  mutate(interval_length = TSS_end - TSS_start,
+         number_of_enhancers_in_interval = overlap_counts.enhancers,
+         number_of_cpg_islands_in_interval = overlap_counts.cpg,
+         number_of_methylated = overlap_counts.methylated,
+         number_of_partially_methylated = overlap_counts.partially.methylated,
+         number_of_unmethylated = overlap_counts.unmethylated)
+
+write.table (hESC.table_tannan, file="tannan_all_genes_LINE_genes_Alu_annotation_with_extra_hg19.txt", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+names(hESC.table_tannan)
+
+################################################################################
+
+#Step 10: Adding annotated features to the table - hESC
+
+View(hESC.table_tannan) #table with 905 genes that were annotated using bigWigOverBed
+
+#Reading annotated tables
+
+CTCF.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeBroadHistoneH1hescCtcfStdSig.bigWig.tab")
+EZH2.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeBroadHistoneH1hescEzh239875Sig.bigWig.tab")
+H2AZ.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeBroadHistoneH1hescH2azStdSig.bigWig.tab")
+H3K4me1.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeBroadHistoneH1hescH3k4me1StdSig.bigWig.tab")
+H3K4me2.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeBroadHistoneH1hescH3k4me2StdSig.bigWig.tab")
+H3K4me3.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeBroadHistoneH1hescH3k4me3StdSig.bigWig.tab")
+H3K9ac.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeBroadHistoneH1hescH3k9acStdSig.bigWig.tab")
+H3K9me3.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeBroadHistoneH1hescH3k09me3StdSig.bigWig.tab")
+H3K27ac.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeBroadHistoneH1hescH3k27acStdSig.bigWig.tab")
+H3K27me3.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeBroadHistoneH1hescH3k27me3StdSig.bigWig.tab")
+H3K36me3.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeBroadHistoneH1hescH3k36me3StdSig.bigWig.tab")
+H3K79me2.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeBroadHistoneH1hescH3k79me2StdSig.bigWig.tab")
+H4K20me1.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeBroadHistoneH1hescH4k20me1StdSig.bigWig.tab")
+Hdac2.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeBroadHistoneH1hescHdac2a300705aSig.bigWig.tab")
+Nanog.rep1.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeHaibTfbsH1hescNanogsc33759V0416102RawRep1.bigWig.tab")
+Nanog.rep2.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeHaibTfbsH1hescNanogsc33759V0416102RawRep2.bigWig.tab")
+Sin3.rep1.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeHaibTfbsH1hescSin3ak20Pcr1xRawRep1.bigWig.tab")
+Sin3.rep2.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeHaibTfbsH1hescSin3ak20Pcr1xRawRep2.bigWig.tab")
+Taf1.rep1.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeHaibTfbsH1hescTaf1V0416102RawRep1.bigWig.tab")
+Taf1.rep2.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeHaibTfbsH1hescTaf1V0416102RawRep2.bigWig.tab")
+Tead4.rep1.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeHaibTfbsH1hescTead4sc101184V0422111RawRep1.bigWig.tab")
+Tead4.rep2.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeHaibTfbsH1hescTead4sc101184V0422111RawRep2.bigWig.tab")
+YY1.rep1.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeHaibTfbsH1hescYy1sc281V0416102RawRep1.bigWig.tab")
+YY1.rep2.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeHaibTfbsH1hescYy1sc281V0416102RawRep2.bigWig.tab")
+DNAse.H1.hESC.base_overlap_signal <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeOpenChromDnaseH1hescBaseOverlapSignal.bigWig.tab")
+DNAse.H1.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeOpenChromDnaseH1hescSig.bigWig.tab")
+DNAse.H9.hESC.base_overlap_signal <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeOpenChromDnaseH9esBaseOverlapSignal.bigWig.tab")
+DNAse.H9.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeOpenChromDnaseH9esSig.bigWig.tab")
+Chd1a.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeSydhTfbsH1hescChd1a301218aIggrabSig.bigWig.tab")
+Mafk.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeSydhTfbsH1hescMafkIggrabSig.bigWig.tab")
+Max.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeSydhTfbsH1hescMaxUcdSig.bigWig.tab")
+Mxi1.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeSydhTfbsH1hescMxi1IggrabSig.bigWig.tab")
+Rad21.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeSydhTfbsH1hescRad21IggrabSig.bigWig.tab")
+Suz12.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/wgEncodeSydhTfbsH1hescSuz12UcdSig.bigWig.tab")
+BCOR.hESC.hg38 <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_hg38_new/GSM2805866_H1_wt_BCOR_P36_Index15_S14_q4_scaled.bigWig.tab")
+KDM2B.hESC.hg38 <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_hg38_new/GSM2805867_H1_egs_KDM2B_P36_Index11_S6.fastq.bigWig.tab")
+RNF2.hESC.hg38 <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_hg38_new/GSM2805868_H1_wt_RNF2_P36_Index16_S15.fastq.bigWig.tab")
+PCGF1.hESC.hg38 <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_hg38_new/GSM2805869_H1_egs_PCGF1_P36_Index12_S7.fastq.bigWig.tab")
+RYBP.hESC.hg38 <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_hg38_new/GSM2805870_H1_egs_RYBP_P36_Index13_S8.fastq.bigWig.tab")
+H2AK119ub.hESC.hg38 <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_hg38_new/GSM2805871_ubH2A_H1_081816_GRCh38.bigWig.tab")
+H3K36me3_gb.hESC <- read.table ("/Users/Bih/Desktop/silico/validation/new_TSS/annotated_1kb_tannan_new/H3K36me3.hESC.tab")
+
+#Renaming the tables
+
+names(CTCF.hESC) <- c("gene", "size", "covered", "sum", "mean0_CTCF.hESC", "mean_CTCF.hESC")
+names(EZH2.hESC) <- c("gene", "size", "covered", "sum", "mean0_EZH2.hESC", "mean_EZH2.hESC")
+names(H2AZ.hESC) <- c("gene", "size", "covered", "sum", "mean0_H2AZ.hESC", "mean_H2AZ.hESC")
+names(H3K4me1.hESC) <- c("gene", "size", "covered", "sum", "mean0_H3K4me1.hESC", "mean_H3K4me1.hESC")
+names(H3K4me2.hESC) <- c("gene", "size", "covered", "sum", "mean0_H3K4me2.hESC", "mean_H3K4me2.hESC")
+names(H3K4me3.hESC) <- c("gene", "size", "covered", "sum", "mean0_H3K4me3.hESC", "mean_H3K4me3.hESC")
+names(H3K9ac.hESC) <- c("gene", "size", "covered", "sum", "mean0_H3K9ac.hESC", "mean_H3K9ac.hESC")
+names(H3K9me3.hESC) <- c("gene", "size", "covered", "sum", "mean0_H3K9me3.hESC", "mean_H3K9me3.hESC")
+names(H3K27ac.hESC) <- c("gene", "size", "covered", "sum", "mean0_H3K27ac.hESC", "mean_H3K27ac.hESC")
+names(H3K27me3.hESC) <- c("gene", "size", "covered", "sum", "mean0_H3K27me3.hESC", "mean_H3K27me3.hESC")
+names(H3K36me3.hESC) <- c("gene", "size", "covered", "sum", "mean0_H3K36me3.hESC", "mean_H3K36me3.hESC")
+names(H3K79me2.hESC) <- c("gene", "size", "covered", "sum", "mean0_H3K79me2.hESC", "mean_H3K79me2.hESC")
+names(H4K20me1.hESC) <- c("gene", "size", "covered", "sum", "mean0_H4K20me1.hESC", "mean_H4K20me1.hESC")
+names(Hdac2.hESC) <- c("gene", "size", "covered", "sum", "mean0_Hdac2.hESC", "mean_Hdac2.hESC")
+names(Nanog.rep1.hESC) <- c("gene", "size", "covered", "sum", "mean0_Nanog.rep1.hESC", "mean_Nanog.rep1.hESC")
+names(Nanog.rep2.hESC) <- c("gene", "size", "covered", "sum", "mean0_Nanog.rep2.hESC", "mean_Nanog.rep2.hESC")
+names(Sin3.rep1.hESC) <- c("gene", "size", "covered", "sum", "mean0_Sin3.rep1.hESC", "mean_Sin3.rep1.hESC")
+names(Sin3.rep2.hESC) <- c("gene", "size", "covered", "sum", "mean0_Sin3.rep2.hESC", "mean_Sin3.rep2.hESC")
+names(Taf1.rep1.hESC) <- c("gene", "size", "covered", "sum", "mean0_Taf1.rep1.hESC", "mean_Taf1.rep1.hESC")
+names(Taf1.rep2.hESC) <- c("gene", "size", "covered", "sum", "mean0_Taf1.rep2.hESC", "mean_Taf1.rep2.hESC")
+names(Tead4.rep1.hESC) <- c("gene", "size", "covered", "sum", "mean0_Tead4.rep1.hESC", "mean_Tead4.rep1.hESC")
+names(Tead4.rep2.hESC) <- c("gene", "size", "covered", "sum", "mean0_Tead4.rep2.hESC", "mean_Tead4.rep2.hESC")
+names(YY1.rep1.hESC) <- c("gene", "size", "covered", "sum", "mean0_YY1.rep1.hESC", "mean_YY1.rep1.hESC")
+names(YY1.rep2.hESC) <- c("gene", "size", "covered", "sum", "mean0_YY1.rep2.hESC", "mean_YY1.rep2.hESC")
+names(DNAse.H1.hESC.base_overlap_signal) <- c("gene", "size", "covered", "sum", "mean0_DNAse.H1.hESC.base_overlap_signal", "mean_DNAse.H1.hESC.base_overlap_signal")
+names(DNAse.H1.hESC) <- c("gene", "size", "covered", "sum", "mean0_DNAse.H1.hESC", "mean_DNAse.H1.hESC")
+names(DNAse.H9.hESC.base_overlap_signal) <- c("gene", "size", "covered", "sum", "mean0_DNAse.H9.hESC.base_overlap_signal", "mean_DNAse.H9.hESC.base_overlap_signal")
+names(DNAse.H9.hESC) <- c("gene", "size", "covered", "sum", "mean0_DNAse.H9.hESC", "mean_DNAse.H9.hESC")
+names(Chd1a.hESC) <- c("gene", "size", "covered", "sum", "mean0_Chd1a.hESC", "mean_Chd1a.hESC")
+names(Mafk.hESC) <- c("gene", "size", "covered", "sum", "mean0_Mafk.hESC", "mean_Mafk.hESC")
+names(Max.hESC) <- c("gene", "size", "covered", "sum", "mean0_Max.hESC", "mean_Max.hESC")
+names(Mxi1.hESC) <- c("gene", "size", "covered", "sum", "mean0_Mxi1.hESC", "mean_Mxi1.hESC")
+names(Rad21.hESC) <- c("gene", "size", "covered", "sum", "mean0_Rad21.hESC", "mean_Rad21.hESC")
+names(Suz12.hESC) <- c("gene", "size", "covered", "sum", "mean0_Suz12.hESC", "mean_Suz12.hESC")
+names(BCOR.hESC.hg38) <- c("gene", "size", "covered", "sum", "mean0_BCOR.hESC.hg38", "mean_BCOR.hESC.hg38")
+names(KDM2B.hESC.hg38) <- c("gene", "size", "covered", "sum", "mean0_KDM2B.hESC.hg38", "mean_KDM2B.hESC.hg38")
+names(RNF2.hESC.hg38) <- c("gene", "size", "covered", "sum", "mean0_RNF2.hESC.hg38", "mean_RNF2.hESC.hg38")
+names(PCGF1.hESC.hg38) <- c("gene", "size", "covered", "sum", "mean0_PCGF1.hESC.hg38", "mean_PCGF1.hESC.hg38")
+names(RYBP.hESC.hg38) <- c("gene", "size", "covered", "sum", "mean0_RYBP.hESC.hg38", "mean_RYBP.hESC.hg38")
+names(H2AK119ub.hESC.hg38) <- c("gene", "size", "covered", "sum", "mean0_H2AK119ub.hESC.hg38", "mean_H2AK119ub.hESC.hg38")
+names(H3K36me3_gb.hESC) <- c("gene", "size", "covered", "sum", "mean0_H3K36me3_gb.hESC", "mean_H3K36me3_gb.hESC")
+
+
+df.1 <- list(hESC.table_tannan,CTCF.hESC, EZH2.hESC, H2AZ.hESC, H3K4me1.hESC, H3K4me2.hESC,
+             H3K4me3.hESC, H3K9ac.hESC, H3K27ac.hESC, H3K27me3.hESC, H3K36me3.hESC,
+             H3K79me2.hESC, H4K20me1.hESC, Hdac2.hESC, Nanog.rep1.hESC, Nanog.rep2.hESC,
+             Sin3.rep1.hESC, Sin3.rep2.hESC, Taf1.rep1.hESC, Taf1.rep2.hESC, Tead4.rep1.hESC,
+             Tead4.rep2.hESC, YY1.rep1.hESC, YY1.rep2.hESC, DNAse.H1.hESC.base_overlap_signal,
+             DNAse.H1.hESC, DNAse.H9.hESC.base_overlap_signal, DNAse.H9.hESC, Chd1a.hESC,
+             Mafk.hESC, Max.hESC, Mxi1.hESC, Rad21.hESC, Suz12.hESC, H3K36me3_gb.hESC, BCOR.hESC.hg38,
+             KDM2B.hESC.hg38, RNF2.hESC.hg38, PCGF1.hESC.hg38, RYBP.hESC.hg38,
+             H2AK119ub.hESC.hg38)
+
+# Adjust the name of the list to indicate it contains data frames
+df.1_sorted_named <- lapply(df.1, function(df) {
+  if (!"gene" %in% colnames(df)) stop("The 'gene' column is missing in one or more tables")
+  df[order(df$gene), ] # Sort each table by the 'gene' column
+})
+
+# Perform a progressive join of the tables
+hESC.table_joint <- Reduce(function(x, y) {
+  full_join(x, y, by = "gene") # Merge tables by the 'gene' column
+}, df.1_sorted_named)
+
+# Remove rows with NAs in any column
+hESC.table_joint_cleaned <- subset(hESC.table_joint, !is.na(hESC.table_joint$mean0_H2AK119ub.hESC.hg38))
+
+all(hESC.table_tannan$gene %in% hESC.table_joint_cleaned$gene)
+#[1] FALSE
+
+sum(duplicated(hESC.table_joint_cleaned$gene)) #No Dups, so ok
+
+#Saving
+
+write.table (hESC.table_joint_cleaned, file="hESC_validation_tannan_table.txt", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
+
+################################################################################
+
+#Step 11: Adding annotated features to the table - GM12878
+
+tannan_table_full <- read.delim("~/Desktop/silico/validation/new_TSS/hESC_validation_tannan_table.txt")
+tannan_table_full_info <- left_join(tannan_table_full,genes_info_unique, by="gene")
+
+
+categories <- names(gm12878.rf.final_info)
+tannan_table_categories <- tannan_table_full_info %>%
+  dplyr::select(any_of(categories))
+
+tannan_table_categories <- tannan_table_categories %>%
+  mutate(Log2FC.2cat_relevel = recode(Log2FC.2cat_relevel,
+                                      "Inactive" = "Subject",
+                                      "Active" = "Escapee"))
+
+names(tannan_table_categories)
+
+table(tannan_table_categories$gene_biotype,tannan_table_categories$Log2FC.2cat_relevel)
+
+
+#                         Escapee Subject
+# antisense                  5       6
+# lincRNA                    7       0
+# miRNA                     54       3
+# processed_transcript       3       2
+# protein_coding           444     334
+# pseudogene                 6       1
+# snoRNA                    37       2
+
+#Filter for protein coding only
+
+gm12878.rf.final_info_coding <- subset(
+  gm12878.rf.final_info,
+  !gene_biotype %in% c("pseudogene", "snoRNA", "miRNA")
+)
+
+tannan_table_categories_coding <- subset(
+  tannan_table_categories,
+  !gene_biotype %in% c("pseudogene", "snoRNA", "miRNA")
+)
+
+
+##################################################################################
+# Data together
+##################################################################################
+
+#Tannan
+
+names(tannan_table_categories)
+
+tannan_first <- tannan_table_categories %>%
+  dplyr::select(-c(13))
+
+names(tannan_first)
+
+#GM12878 files for tannan
+path_tannan <- "/Users/Bih/Desktop/silico/Final_LRS/Gm12878/tannan_annotated_1kb"
+
+#Files
+files_tannan <- list.files(path_tannan, pattern = "\\.bigWig\\.tab$", full.names = TRUE)
+
+
+clean_name_tannan <- function(x) {
+  x <- basename(x)
+  
+  # remove extensão
+  x <- sub("\\.bigWig\\.tab$", "", x)
+  
+  #upper case
+  x <- toupper(x)
+  
+  # adiciona sufixo
+  paste0(x, ".gm12878")
+}
+
+rename_cols <- function(df, tag) {
+  names(df) <- c(
+    "gene", "size", "covered", "sum",
+    paste0("mean0_", tag),
+    paste0("mean_", tag)
+  )
+  df
+}
+
+#List
+GM12878_tannan <- list()
+
+for (f in files_tannan) {
+  tag <- clean_name_tannan(f)              #object name
+  df <- read.table(f)               #read
+  df <- rename_cols(df, tag)        #rename
+  GM12878_tannan[[tag]] <- df              #save
+}
+
+names(GM12878_tannan)
+
+cols <- names(GM12878_tannan)
+for (nm in cols) {
+  assign(nm, data.frame(GM12878_tannan[[nm]]))
+}
+
+
+df.1 <- list(
+  tannan_first = tannan_first,
+  BMI1.gm12878 = BMI1.gm12878,
+  CHD1A.gm12878 = CHD1A.gm12878,
+  CTCF.gm12878 = CTCF.gm12878,
+  DNASE.gm12878 = DNASE.gm12878,
+  EZH2.gm12878 = EZH2.gm12878,
+  H2AZ.gm12878 = H2AZ.gm12878,
+  H3K27AC.gm12878 = H3K27AC.gm12878,
+  H3K27ME3.gm12878 = H3K27ME3.gm12878,
+  H3K36ME3.gm12878 = H3K36ME3.gm12878,
+  H3K4ME1.gm12878 = H3K4ME1.gm12878,
+  H3K4ME2.gm12878 = H3K4ME2.gm12878,
+  H3K4ME3.gm12878 = H3K4ME3.gm12878,
+  H3K79ME2.gm12878 = H3K79ME2.gm12878,
+  H3K9AC.gm12878 = H3K9AC.gm12878,
+  H4K20ME1.gm12878 = H4K20ME1.gm12878,
+  HDAC2.gm12878 = HDAC2.gm12878,
+  MAFK.gm12878 = MAFK.gm12878,
+  MAX.gm12878 = MAX.gm12878,
+  MXI1.gm12878 = MXI1.gm12878,
+  RAD21.gm12878 = RAD21.gm12878,
+  SIN3A.gm12878 = SIN3A.gm12878,
+  SMC3.gm12878 = SMC3.gm12878,
+  TAF1.gm12878 = TAF1.gm12878,
+  YY1.gm12878 = YY1.gm12878
+)
+
+# Adjust the name of the list to indicate it contains data frames
+df.1_sorted_named <- lapply(df.1, function(df) {
+  if (!"gene" %in% colnames(df)) stop("The 'gene' column is missing in one or more tables")
+  df[order(df$gene), ] # Sort each table by the 'gene' column
+})
+
+# Perform a progressive join of the tables
+gm12878.table_joint <- Reduce(function(x, y) {
+  full_join(x, y, by = "gene") # Merge tables by the 'gene' column
+}, df.1_sorted_named)
+
+# Remove rows with NAs in any column
+gm12878.tannan.table_joint_cleaned <- subset(gm12878.table_joint, !is.na(gm12878.table_joint$distance_XIST_linear))
+
+all(tannan_first$gene %in% gm12878.tannan.table_joint_cleaned$gene)
+#[1] TRUE
+
+#Saving
+
+write.table (gm12878.tannan.table_joint_cleaned, file="tannan_gm12878_validation_LRS_table.txt", sep="\t", row.names=FALSE, col.names = TRUE, quote=FALSE)
