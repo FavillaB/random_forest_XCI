@@ -836,14 +836,6 @@ table(tannan_table_categories$gene_biotype,tannan_table_categories$Log2FC.2cat_r
 # pseudogene                 6       1
 # snoRNA                    37       2
 
-##################################################################################
-# Preparation of tables for binary tests
-##################################################################################
-
-#Relevel of Log2FC.2cat_relevel if necessary
-
-#Tables I am using: tannan_table_categories and hESC.rf.final
-
 categories <- setdiff(names(hESC.rf.final), c("Log2FC_num", "gene_biotype", "allelic_normal", "allelic_derivative", "haplotype_derivative"))
 
 ##################################################################################
