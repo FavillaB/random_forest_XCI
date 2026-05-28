@@ -745,7 +745,7 @@ write.table (hESC.rf.right_relevel , file="hESC_right_LRS_table_dirty_strict", s
 
 ##################################################################################
 
-#Relevel: when I want to change Log2FC levels
+#Relevel:
 
 hESC.rf.right_relevel <- hESC.rf.right_relevel %>%
   dplyr::mutate(
