@@ -351,7 +351,7 @@ n_positive_deep <- sum(annotated_genes_hg19_TSS$strand == "+" &
 # 26 genes on positive strand
 
 n_negative_deep <- sum(annotated_genes_hg19_TSS$strand == "-" &
-                         annotated_genes_hg19_TSS$nearest_TSS_start 
+                         annotated_genes_hg19_TSS$nearest_TSS_start <
                        (annotated_genes_hg19_TSS$end - 1000))
 # 22 genes on negative strand
 
