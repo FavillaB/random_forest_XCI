@@ -317,6 +317,45 @@ annotated_negative <- create_annotated_df(gr_genes_negative, gr_TSS_negative)
 # Combine the results for both strands
 annotated_genes_hg19_TSS <- rbind(annotated_positive, annotated_negative) #1378
 
+#TSS ANNOTATION QUALITY CONTROL
+# Validates that annotated TSS positions are close to the
+# expected transcription start site for each gene,
+# considering strand orientation
+
+# Distance between annotated TSS and expected gene boundary
+annotated_genes_hg19_TSS$tss_distance_from_correct_end <- ifelse(
+  annotated_genes_hg19_TSS$strand == "+",
+  abs(annotated_genes_hg19_TSS$nearest_TSS_start - annotated_genes_hg19_TSS$start),
+  abs(annotated_genes_hg19_TSS$nearest_TSS_start - annotated_genes_hg19_TSS$end)
+)
+
+summary(annotated_genes_hg19_TSS$tss_distance_from_correct_end)
+# Min. 1st Qu.  Median    Mean 3rd Qu.    Max.
+# 0.0    28.0    69.0   372.7   239.5 17513.0
+# Median distance of 69bp indicates accurate TSS annotation for most genes
+
+hist(annotated_genes_hg19_TSS$tss_distance_from_correct_end, breaks = 50,
+     main = "Distance from annotated TSS to gene boundary",
+     xlab = "Distance (bp)")
+
+# Flag genes where TSS is more than 1kb inside the gene body
+# (beyond the ±1kb analysis window)
+n_positive_deep <- sum(annotated_genes_hg19_TSS$strand == "+" &
+                         annotated_genes_hg19_TSS$nearest_TSS_start >
+                         (annotated_genes_hg19_TSS$start + 1000))
+# 26 genes on positive strand
+
+n_negative_deep <- sum(annotated_genes_hg19_TSS$strand == "-" &
+                         annotated_genes_hg19_TSS$nearest_TSS_start 
+                       (annotated_genes_hg19_TSS$end - 1000))
+# 22 genes on negative strand
+
+cat("Genes with TSS > 1kb inside gene body:", n_positive_deep + n_negative_deep, 
+    "out of", nrow(annotated_genes_hg19_TSS), 
+    sprintf("(%.1f%%)\n", 100 * (n_positive_deep + n_negative_deep) / nrow(annotated_genes_hg19_TSS)))
+# Conclusion: <5% of genes affected — TSS annotation is robust for the majority of genes
+
+
 #Creating TSS -/+ 1 kb
 
 #hg19
