@@ -353,7 +353,7 @@ n_negative_deep <- sum(annotated_genes_hg19_TSS$strand == "-" &
 cat("Genes with TSS > 1kb inside gene body:", n_positive_deep + n_negative_deep, 
     "out of", nrow(annotated_genes_hg19_TSS), 
     sprintf("(%.1f%%)\n", 100 * (n_positive_deep + n_negative_deep) / nrow(annotated_genes_hg19_TSS)))
-# Conclusion: <5% of genes affected — TSS annotation is robust for the majority of genes
+# Conclusion: <5% of genes affected: TSS annotation is robust for the majority of genes
 
 
 #Creating TSS -/+ 1 kb
